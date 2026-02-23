@@ -3,9 +3,12 @@ package pulse
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
+	"strings"
 
+	"github.com/MUKE-coder/pulse/ui"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
@@ -99,21 +102,83 @@ func Mount(router *gin.Engine, db *gorm.DB, configs ...Config) *Pulse {
 	// Register REST API endpoints
 	registerAPIRoutes(router, p)
 
-	// Register dashboard routes
+	// Serve embedded React dashboard
 	prefix := cfg.Prefix
-	router.GET(prefix, func(c *gin.Context) {
-		c.Redirect(http.StatusMovedPermanently, prefix+"/")
-	})
-	router.GET(prefix+"/", func(c *gin.Context) {
-		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(placeholderHTML(cfg)))
-	})
+	registerDashboardRoutes(router, prefix, cfg)
 
-	log.Printf("[pulse] mounted at %s — dashboard: http://localhost:8080%s/", prefix, prefix)
+	log.Printf("[pulse] mounted at %s — dashboard: http://localhost:8080%s/ui/", prefix, prefix)
 	if cfg.DevMode {
 		log.Printf("[pulse] dev mode enabled — verbose logging active")
 	}
 
 	return p
+}
+
+// registerDashboardRoutes serves the embedded React dashboard or falls back to a placeholder.
+func registerDashboardRoutes(router *gin.Engine, prefix string, cfg Config) {
+	distFS, err := ui.DistFS()
+	if err != nil {
+		log.Printf("[pulse] failed to load embedded UI: %v (serving fallback)", err)
+		router.GET(prefix+"/ui/*filepath", func(c *gin.Context) {
+			c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(placeholderHTML(cfg)))
+		})
+		return
+	}
+
+	// Read index.html once at startup
+	indexHTML, readErr := fs.ReadFile(distFS, "index.html")
+	if readErr != nil {
+		log.Printf("[pulse] warning: index.html not found in embedded UI: %v", readErr)
+		indexHTML = []byte(placeholderHTML(cfg))
+	}
+
+	// Redirect /pulse → /pulse/ui/
+	router.GET(prefix, func(c *gin.Context) {
+		c.Redirect(http.StatusMovedPermanently, prefix+"/ui/")
+	})
+	router.GET(prefix+"/", func(c *gin.Context) {
+		c.Redirect(http.StatusMovedPermanently, prefix+"/ui/")
+	})
+
+	// Serve dashboard SPA
+	router.GET(prefix+"/ui/*filepath", func(c *gin.Context) {
+		filePath := strings.TrimPrefix(c.Param("filepath"), "/")
+		if filePath == "" || filePath == "/" {
+			c.Data(http.StatusOK, "text/html; charset=utf-8", indexHTML)
+			return
+		}
+
+		// Try to serve the static file (JS, CSS, images)
+		data, readErr := fs.ReadFile(distFS, filePath)
+		if readErr != nil {
+			// SPA fallback: serve index.html for client-side routing
+			c.Data(http.StatusOK, "text/html; charset=utf-8", indexHTML)
+			return
+		}
+
+		contentType := "application/octet-stream"
+		switch {
+		case strings.HasSuffix(filePath, ".html"):
+			contentType = "text/html; charset=utf-8"
+		case strings.HasSuffix(filePath, ".js"):
+			contentType = "application/javascript"
+		case strings.HasSuffix(filePath, ".css"):
+			contentType = "text/css"
+		case strings.HasSuffix(filePath, ".json"):
+			contentType = "application/json"
+		case strings.HasSuffix(filePath, ".svg"):
+			contentType = "image/svg+xml"
+		case strings.HasSuffix(filePath, ".png"):
+			contentType = "image/png"
+		case strings.HasSuffix(filePath, ".ico"):
+			contentType = "image/x-icon"
+		case strings.HasSuffix(filePath, ".woff2"):
+			contentType = "font/woff2"
+		case strings.HasSuffix(filePath, ".woff"):
+			contentType = "font/woff"
+		}
+		c.Data(http.StatusOK, contentType, data)
+	})
 }
 
 // placeholderHTML returns a simple HTML page confirming Pulse is mounted.
