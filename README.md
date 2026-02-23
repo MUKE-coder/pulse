@@ -130,7 +130,7 @@ func main() {
     router := gin.Default()
 
     // One line to mount Pulse
-    p := pulse.Mount(router, db, pulse.Config{
+    pulse.Mount(router, db, pulse.Config{
         AppName: "My API",
         DevMode: true,
     })
