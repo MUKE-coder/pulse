@@ -9,6 +9,7 @@ Pulse gives you full visibility into your application's HTTP requests, database 
 ## Table of Contents
 
 - [Features](#features)
+- [Dashboard](#dashboard)
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
@@ -51,7 +52,41 @@ Pulse gives you full visibility into your application's HTTP requests, database 
 - **Prometheus Export** — Standard exposition format endpoint for Grafana/Prometheus integration.
 - **Data Export** — Export requests, queries, errors, runtime metrics, and alerts as JSON or CSV.
 - **JWT Authentication** — Dashboard API protected with HS256 JWT tokens (no external auth library).
+- **Embedded React Dashboard** — Full-featured UI with 8 pages (Overview, Routes, Database, Errors, Runtime, Health, Alerts, Settings) embedded into the Go binary via `//go:embed`. No separate frontend deployment needed.
 - **Zero External Dependencies** — No Redis, no Kafka, no external collectors. Everything runs in-process with ring buffer storage.
+
+---
+
+## Dashboard
+
+Pulse ships with a full React dashboard embedded directly into the Go binary using `//go:embed`. No separate frontend deployment, no CDN, no build step needed by consumers — just `go get` and it works.
+
+**URL:** `http://localhost:8080/pulse/ui/` (default credentials: `admin` / `pulse`)
+
+**Pages:**
+
+| Page | Description |
+|------|-------------|
+| **Overview** | KPI cards (requests, error rate, latency, goroutines), throughput and error charts, top routes, recent errors |
+| **Routes** | Searchable route table with method badges, latency percentiles (P50/P95/P99), RPM, trend indicators; click for detail modal with latency distribution chart |
+| **Database** | Slow queries, query patterns, N+1 detection with tabs; connection pool stats (open, in-use, idle) |
+| **Errors** | Filterable error list (by type, muted, resolved); detail modal with full stack trace, mute/resolve/delete actions |
+| **Runtime** | Memory and goroutine line charts over time, system info (Go version, CPUs, PID); real-time updates via WebSocket |
+| **Health** | Health check cards with status badges and latency; run checks on-demand; per-check history table |
+| **Alerts** | Firing/critical/resolved summary; filterable alert table with rule, metric, value, threshold, and timestamps |
+| **Settings** | Data export (JSON/CSV), current configuration display, danger zone data reset |
+
+**Tech Stack:** React 19, React Router 7, Vite 6, Tailwind CSS 4, Recharts 2
+
+**Rebuilding the dashboard (contributors only):**
+
+```bash
+cd ui/dashboard
+npm install
+npm run build   # outputs to ui/dist/
+```
+
+The `ui/dist/` directory is committed to the repo so consumers don't need Node.js.
 
 ---
 
@@ -105,15 +140,16 @@ func main() {
         c.JSON(200, gin.H{"users": []string{"alice", "bob"}})
     })
 
-    // Dashboard:  http://localhost:8080/pulse/
+    // Dashboard:  http://localhost:8080/pulse/ui/
     // API:        http://localhost:8080/pulse/api/
     // Health:     http://localhost:8080/pulse/health
     // WebSocket:  ws://localhost:8080/pulse/ws/live
+    // Login:      admin / pulse (default credentials)
     log.Fatal(router.Run(":8080"))
 }
 ```
 
-After starting, Pulse automatically begins tracking every HTTP request, database query, runtime metric, and error. Open `http://localhost:8080/pulse/` to see the dashboard placeholder (the React frontend is a separate build step).
+After starting, Pulse automatically begins tracking every HTTP request, database query, runtime metric, and error. Open `http://localhost:8080/pulse/ui/` to access the dashboard (default login: `admin` / `pulse`). The React dashboard is embedded into the Go binary — no separate frontend deployment needed.
 
 ---
 
