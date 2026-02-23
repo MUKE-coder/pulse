@@ -132,11 +132,15 @@ func registerDashboardRoutes(router *gin.Engine, prefix string, cfg Config) {
 		indexHTML = []byte(placeholderHTML(cfg))
 	}
 
-	// Redirect /pulse → /pulse/ui/
+	// Redirect /pulse and /pulse/ → /pulse/ui/
 	router.GET(prefix, func(c *gin.Context) {
 		c.Redirect(http.StatusMovedPermanently, prefix+"/ui/")
 	})
 	router.GET(prefix+"/", func(c *gin.Context) {
+		c.Redirect(http.StatusMovedPermanently, prefix+"/ui/")
+	})
+	// Redirect /pulse/ui (no trailing slash) → /pulse/ui/
+	router.GET(prefix+"/ui", func(c *gin.Context) {
 		c.Redirect(http.StatusMovedPermanently, prefix+"/ui/")
 	})
 
