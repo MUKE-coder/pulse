@@ -52,6 +52,9 @@ type Pulse struct {
 	// SLO evaluator (nil if no SLOs configured)
 	sloEvaluator *sloEvaluator
 
+	// USE-method sampler (nil if disabled via Config.USE.Enabled)
+	useSampler *useSampler
+
 	// Lifecycle management
 	ctx    context.Context
 	cancel context.CancelFunc

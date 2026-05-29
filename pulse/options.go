@@ -228,3 +228,12 @@ func WithPrometheusPath(path string) Option {
 func WithSLO(slo SLO) Option {
 	return func(c *Config) { c.SLOs = append(c.SLOs, slo) }
 }
+
+// --- USE method ---
+
+// WithUSEDisabled turns off the USE-method host-resource sampler. Use this
+// if you don't want Pulse to call into gopsutil (for example in a
+// minimal-permissions container where /proc is restricted).
+func WithUSEDisabled() Option {
+	return func(c *Config) { c.USE.Enabled = boolPtr(false) }
+}

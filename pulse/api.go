@@ -131,6 +131,7 @@ func registerAPIRoutes(router *gin.Engine, p *Pulse) {
 	protected.GET("/database/slow-queries", dbSlowQueriesHandler(p))
 	protected.GET("/database/patterns", dbPatternsHandler(p))
 	protected.GET("/database/n1", dbN1Handler(p))
+	protected.GET("/database/n1/ranked", dbN1RankedHandler(p))
 	protected.GET("/database/pool", dbPoolHandler(p))
 
 	// Errors
@@ -155,6 +156,9 @@ func registerAPIRoutes(router *gin.Engine, p *Pulse) {
 
 	// SLOs
 	protected.GET("/slos", slosListHandler(p))
+
+	// USE method (host U/S/E grid)
+	protected.GET("/use", useHandler(p))
 
 	// Settings & data
 	protected.GET("/settings", settingsHandler(p))
@@ -404,6 +408,18 @@ func dbN1Handler(p *Pulse) gin.HandlerFunc {
 	}
 }
 
+// dbN1RankedHandler returns N+1 findings grouped by (route, pattern) and
+// sorted by impact score (occurrences × queries/occurrence × avg duration),
+// so operators see the highest-leverage fix first. Optional ?limit=N.
+func dbN1RankedHandler(p *Pulse) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		tr := parseTimeRangeParam(c)
+		detections, _ := p.storage.GetN1Detections(tr)
+		ranked := rankN1Detections(detections, queryInt(c, "limit", 50))
+		c.JSON(http.StatusOK, ranked)
+	}
+}
+
 func dbPoolHandler(p *Pulse) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		pool, _ := p.storage.GetConnectionPoolStats()
@@ -592,6 +608,21 @@ func slosListHandler(p *Pulse) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, p.sloEvaluator.Snapshot())
+	}
+}
+
+// --- USE method ---
+
+// useHandler returns the most recent USE snapshot. When the sampler is
+// disabled, returns an empty snapshot rather than 404 so the dashboard can
+// render a single "USE disabled" state.
+func useHandler(p *Pulse) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if p.useSampler == nil {
+			c.JSON(http.StatusOK, USESnapshot{Timestamp: time.Now()})
+			return
+		}
+		c.JSON(http.StatusOK, p.useSampler.Snapshot())
 	}
 }
 

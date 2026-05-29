@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.0] — 2026-05-29
+
+Closes [#2](https://github.com/MUKE-coder/pulse/issues/2) (N+1 detector
+enhancements) and [#3](https://github.com/MUKE-coder/pulse/issues/3)
+(USE-method dashboard). No breaking changes.
+
+### Added
+
+**N+1 detector (issue #2):**
+
+- Each `N1Detection` now carries the matched **route** (e.g. `GET /api/orders`)
+  alongside the trace ID, so the dashboard can point directly at the
+  offending handler. The route is propagated from the tracing middleware via
+  the new `pulse.ContextWithRoute` / `pulse.RouteFromContext` helpers.
+- Each `N1Detection` now carries a `SuggestedFix` string with a one-sentence
+  hint at the likely root cause:
+  - `WHERE id = ?` → use `Preload` / `Joins`
+  - `WHERE x_id = ?` → batch-load with `Preload` or an `IN (?)` clause
+  - `LIMIT 1` → looks like `.First(...)` in a loop
+  - `SELECT count(*)` → aggregate with `GROUP BY` instead
+  - `SELECT 1 / SELECT EXISTS` → replace per-row check with a join
+  Match logic lives in `suggestN1Fix` ([pulse/n1.go](pulse/n1.go)) and is
+  intentionally conservative — if no shape matches, a generic fallback nudge
+  is returned.
+- New `N1Detection.AvgDuration` field for the per-query average duration of
+  the burst.
+- **`GET /pulse/api/database/n1/ranked`** — new authenticated endpoint
+  returning N+1 findings grouped by `(route, normalised SQL)` and sorted by
+  an **impact score** equal to `occurrences × queries-per-occurrence × avg
+  query duration`. This is the "fix-this-first" ordering the issue calls
+  out. Accepts `?range=` and `?limit=`. Response shape: `[]N1Ranking`.
+- N+1 dev-mode log lines now include the handler route and the suggested
+  fix, so the error is actionable at log-tail time.
+
+**USE-method dashboard (issue #3):**
+
+- New host-resource sampler ([pulse/use.go](pulse/use.go)) implementing
+  Brendan Gregg's [USE method](https://brendangregg.com/usemethod.html).
+  Every tick (5 s, or 2 s in DevMode) emits a `USESnapshot` covering six
+  resources — **CPU**, **Memory**, **Disk**, **Network**, **DB pool**,
+  **Goroutines** — each with a **Utilization / Saturation / Errors** triple.
+  Cells are colour-banded (`green` / `amber` / `red` / `unknown`) so the
+  dashboard rendering can be a single glance.
+- Host metrics are sourced via
+  [gopsutil](https://github.com/shirou/gopsutil/v4) (CPU%, load average,
+  memory, disk usage and I/O, network counters). DB-pool, goroutine, and GC
+  cells reuse data Pulse already collects, so they work even when host
+  metrics are unavailable (containers with restricted `/proc`, etc.). Cells
+  that the host can't expose render as "unknown" rather than failing.
+- **`GET /pulse/api/use`** — new authenticated endpoint returning the
+  current `USESnapshot`. Returns an empty snapshot (not 404) when the
+  sampler is disabled, so the dashboard can render a single empty-state
+  message.
+- **`pulse.WithUSEDisabled()`** option (and `Config.USE.Enabled *bool`) for
+  callers running in environments where gopsutil shouldn't be called at all
+  (minimal-permission containers, scratch images, etc.).
+- New dependency: `github.com/shirou/gopsutil/v4 v4.26.4`.
+
+### Changed
+
+- `pulse.Config` gains a `USE USEConfig` field. Zero value defaults to
+  enabled (matching `WithUSEDisabled()` being opt-out, not opt-in).
+- `N1Detection` JSON now includes `route`, `avg_duration`, and
+  `suggested_fix` (the last one is omitted when empty).
+
+### Migration notes
+
+Both additions are zero-config — if you already use `pulse.Mount(ctx, router,
+db, ...)`, you'll see `/pulse/api/use` and `/pulse/api/database/n1/ranked`
+start working immediately. The N+1 detector continues to populate
+`/pulse/api/database/n1` with the existing payload shape, plus the new
+fields.
+
+---
+
 ## [0.3.0] — 2026-05-29
 
 Implements [#1](https://github.com/MUKE-coder/pulse/issues/1) — SLO objects
@@ -263,14 +338,12 @@ milestones.
 These items were scoped during earlier reviews but deferred to focused
 milestones:
 
-- **v0.4.0** — [#2](https://github.com/MUKE-coder/pulse/issues/2) N+1 detector
-  enhancements + [#3](https://github.com/MUKE-coder/pulse/issues/3) USE
-  method dashboard.
 - **v0.5.0** — [#4](https://github.com/MUKE-coder/pulse/issues/4) k6 test-run
   overlay and pprof flame graph.
 - **v1.0.0** — Persistent SQLite storage backend, embedded dashboard ported to
   Tailwind, public API freeze.
 
+[0.4.0]: https://github.com/MUKE-coder/pulse/releases/tag/v0.4.0
 [0.3.0]: https://github.com/MUKE-coder/pulse/releases/tag/v0.3.0
 [0.2.0]: https://github.com/MUKE-coder/pulse/releases/tag/v0.2.0
 [0.1.0]: https://github.com/MUKE-coder/pulse/releases/tag/v0.1.0

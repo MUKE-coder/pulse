@@ -433,6 +433,29 @@ The two-phase transition (OK -> Pending -> Firing) prevents false alerts from tr
 - `goroutine_growth` — Goroutine growth rate per hour
 - `health_status` — Composite health check status (1 = healthy, 0 = unhealthy)
 
+### USE method (host U/S/E grid)
+
+Pulse implements Brendan Gregg's [USE method](https://brendangregg.com/usemethod.html) — for every system resource, walk **U**tilization / **S**aturation / **E**rrors. A background sampler refreshes the grid every 5 s (2 s in DevMode), and `GET /pulse/api/use` returns the live snapshot:
+
+| Resource | Utilization | Saturation | Errors |
+|----------|-------------|------------|--------|
+| **CPU** | % busy (1 s window) | load1 normalised by CPU count | CPU stalls (perf counters — usually `unknown`) |
+| **Memory** | host memory % used | last GC pause | OOM events (tracked by the container runtime, not Pulse) |
+| **Disk** | % full on the worst-mounted FS | max in-flight I/O ops | per-disk I/O errors (cross-platform: `unknown`) |
+| **Network** | aggregate Mbps | drops/sec | cumulative interface errors |
+| **DB pool** | `in-use / max` | total `WaitCount` since boot | (see Errors page) |
+| **Goroutines** | live count | growth rate / hour | panics (see Errors page) |
+
+Cells are colour-banded `green`/`amber`/`red`/`unknown` so the eye lands on the bottleneck. Host metrics come from [gopsutil](https://github.com/shirou/gopsutil/v4); on platforms where a metric isn't exposed (e.g. load average on Windows) the cell renders as `unknown` rather than failing.
+
+Opt out with `pulse.WithUSEDisabled()` if you don't want Pulse touching gopsutil — handy in minimal-permission containers.
+
+### N+1 ranked by impact
+
+`GET /pulse/api/database/n1` returns the raw per-request detections. `GET /pulse/api/database/n1/ranked` groups them by `(route, normalised SQL)` and sorts by **impact score** — `occurrences × queries-per-occurrence × avg query duration` — so the entry at position 0 is the fix that buys you the most wall-clock back per hour spent.
+
+Each ranked entry also carries a `suggested_fix` string with a one-sentence hint at the likely root cause (e.g. *"This looks like `.First(...)` in a loop. Use `.Preload(...)` on the outer query..."*). Pulse's matchers are intentionally conservative — when a SQL shape isn't recognised, a generic nudge is returned rather than a confident-but-wrong guess.
+
 ### SLOs and burn-rate alerts
 
 Declare service-level objectives directly in your config. Pulse continuously evaluates them against live traffic, exposes the current state at `GET /pulse/api/slos`, and fires alerts through the same Slack/Discord/Email/Webhook channels you've already wired up.
@@ -628,7 +651,8 @@ All endpoints under `/pulse/api/` require JWT authentication (except login).
 | `GET` | `/pulse/api/database/overview` | `?range=1h` | DB statistics summary |
 | `GET` | `/pulse/api/database/slow-queries` | `?threshold=100ms&limit=50` | Slow queries |
 | `GET` | `/pulse/api/database/patterns` | `?range=1h` | Aggregated query patterns |
-| `GET` | `/pulse/api/database/n1` | `?range=1h` | N+1 query detections |
+| `GET` | `/pulse/api/database/n1` | `?range=1h` | N+1 query detections (raw, per-request) |
+| `GET` | `/pulse/api/database/n1/ranked` | `?range=1h&limit=50` | N+1 grouped by (route, pattern), ranked by impact score |
 | `GET` | `/pulse/api/database/pool` | | Connection pool stats |
 
 ### Errors
@@ -668,6 +692,12 @@ All endpoints under `/pulse/api/` require JWT authentication (except login).
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/pulse/api/slos` | Current SLOStatus per configured SLO, including per-window burn rate and budget consumed |
+
+### USE Method (Utilization / Saturation / Errors)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/pulse/api/use` | Live USE snapshot — CPU, Memory, Disk, Network, DB pool, Goroutines, each with U/S/E cells colour-banded as `green` / `amber` / `red` / `unknown` |
 
 ### Settings & Data
 
@@ -1009,7 +1039,6 @@ Pulse follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The cu
 
 | Version | Theme |
 |---------|-------|
-| `v0.4.0` | N+1 detector enhancements ([#2](https://github.com/MUKE-coder/pulse/issues/2)) + USE method dashboard ([#3](https://github.com/MUKE-coder/pulse/issues/3)) |
 | `v0.5.0` | k6 test-run overlay + pprof flame graph ([#4](https://github.com/MUKE-coder/pulse/issues/4)) |
 | `v1.0.0` | Persistent SQLite storage backend, dashboard ported to Tailwind, public API freeze |
 

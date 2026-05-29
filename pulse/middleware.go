@@ -98,9 +98,13 @@ func newTracingMiddleware(p *Pulse) gin.HandlerFunc {
 		c.Header(TraceIDHeader, traceID)
 		c.Header(TraceparentHeader, BuildTraceparent(traceID, parentSpanID))
 
-		// Attach trace ID and pulse instance to context
+		// Attach trace ID and pulse instance to context. The route pattern
+		// is best-effort here — Gin only resolves c.FullPath() *after* it has
+		// matched the route, so the value may be empty for 404s. We refresh
+		// it in the GORM plugin via RouteFromContext when needed.
 		ctx := ContextWithTraceID(c.Request.Context(), traceID)
 		ctx = ContextWithPulse(ctx, p)
+		ctx = ContextWithRoute(ctx, c.Request.Method+" "+c.FullPath())
 		c.Request = c.Request.WithContext(ctx)
 
 		// Wrap response writer

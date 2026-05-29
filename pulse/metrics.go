@@ -242,9 +242,28 @@ type N1Detection struct {
 	Pattern        string        `json:"pattern"`
 	Count          int           `json:"count"`
 	TotalDuration  time.Duration `json:"total_duration"`
+	AvgDuration    time.Duration `json:"avg_duration"`
 	RequestTraceID string        `json:"request_trace_id"`
 	Route          string        `json:"route"`
+	SuggestedFix   string        `json:"suggested_fix,omitempty"`
 	DetectedAt     time.Time     `json:"detected_at"`
+}
+
+// N1Ranking is one row in the ranked-by-impact N+1 endpoint. Findings are
+// grouped by (route, normalised SQL fingerprint) and ranked by an impact
+// score equal to occurrences × queries-per-occurrence × avg query duration —
+// roughly "total wall-clock cost across all observed requests".
+type N1Ranking struct {
+	Route               string        `json:"route"`
+	Pattern             string        `json:"pattern"`
+	Occurrences         int           `json:"occurrences"`            // how many distinct requests hit this N+1
+	AvgQueriesPerHit    float64       `json:"avg_queries_per_hit"`    // queries-per-occurrence
+	AvgQueryDuration    time.Duration `json:"avg_query_duration"`
+	TotalDuration       time.Duration `json:"total_duration"`         // sum across all occurrences
+	ImpactScore         float64       `json:"impact_score"`           // sort key (higher = worse)
+	SuggestedFix        string        `json:"suggested_fix,omitempty"`
+	FirstSeen           time.Time     `json:"first_seen"`
+	LastSeen            time.Time     `json:"last_seen"`
 }
 
 // PoolStats holds database connection pool statistics.

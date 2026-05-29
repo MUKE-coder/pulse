@@ -9,7 +9,7 @@ import (
 )
 
 // Version is the current Pulse SDK version, bumped on each release.
-const Version = "0.3.0"
+const Version = "0.4.0"
 
 // DefaultUsername is the placeholder dashboard username shipped in defaults.
 // In production (DevMode=false) Pulse refuses to start while this value is in
@@ -71,8 +71,25 @@ type Config struct {
 	// the standard notification channels. See [SLO] and [BurnRateAlert].
 	SLOs []SLO
 
+	// USE configures the USE-method host-resource sampler.
+	USE USEConfig
+
 	// DevMode enables verbose logging and more frequent aggregation.
 	DevMode bool
+}
+
+// USEConfig configures Brendan Gregg's USE-method dashboard (Utilization /
+// Saturation / Errors per resource). See pulse/use.go.
+//
+// The USE sampler reads host-level CPU, memory, disk, and network metrics via
+// [gopsutil]. On platforms where gopsutil cannot expose a metric (e.g. load
+// average on Windows), the corresponding cell is marked "unknown" rather
+// than failing.
+//
+// [gopsutil]: https://github.com/shirou/gopsutil
+type USEConfig struct {
+	// Enabled toggles the USE sampler. Default: true.
+	Enabled *bool
 }
 
 // DashboardConfig holds dashboard authentication settings.
@@ -307,6 +324,9 @@ func DefaultConfig() Config {
 			Enabled: false,
 			Path:    "/pulse/metrics",
 		},
+		USE: USEConfig{
+			Enabled: boolPtr(true),
+		},
 		DevMode: false,
 	}
 }
@@ -415,6 +435,11 @@ func applyDefaults(cfg Config) Config {
 	// Prometheus
 	if cfg.Prometheus.Path == "" {
 		cfg.Prometheus.Path = defaults.Prometheus.Path
+	}
+
+	// USE
+	if cfg.USE.Enabled == nil {
+		cfg.USE.Enabled = defaults.USE.Enabled
 	}
 
 	return cfg

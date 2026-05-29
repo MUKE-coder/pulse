@@ -123,6 +123,11 @@ func Mount(ctx context.Context, router *gin.Engine, db *gorm.DB, opts ...Option)
 		p.sloEvaluator = newSLOEvaluator(p, cfg.SLOs)
 	}
 
+	// Start USE-method host-resource sampler.
+	if boolValue(cfg.USE.Enabled) {
+		p.useSampler = newUSESampler(p)
+	}
+
 	// Register error tracking middleware (outermost — catches panics from all handlers)
 	if boolValue(cfg.Errors.Enabled) {
 		router.Use(newErrorMiddleware(p))

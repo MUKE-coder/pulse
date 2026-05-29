@@ -25,6 +25,7 @@ const (
 
 	traceIDKey contextKey = "pulse_trace_id"
 	pulseKey   contextKey = "pulse_instance"
+	routeKey   contextKey = "pulse_route"
 )
 
 // traceID pool to reduce allocations
@@ -72,6 +73,23 @@ func PulseFromContext(ctx context.Context) *Pulse {
 		return v
 	}
 	return nil
+}
+
+// ContextWithRoute returns a new context carrying the matched route pattern
+// (e.g. "GET /users/:id"). The tracing middleware sets this so downstream
+// callbacks like the GORM plugin can attribute queries to a handler without
+// having to walk the call stack.
+func ContextWithRoute(ctx context.Context, route string) context.Context {
+	return context.WithValue(ctx, routeKey, route)
+}
+
+// RouteFromContext returns the matched route pattern previously stashed by
+// [ContextWithRoute], or "" if none is present.
+func RouteFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(routeKey).(string); ok {
+		return v
+	}
+	return ""
 }
 
 // GenerateSpanID returns a new random 16-character hex span ID, suitable for

@@ -197,20 +197,22 @@ func (p *PulsePlugin) trackN1(traceID, normalizedSQL string, duration time.Durat
 
 	// Only fire on the exact threshold crossing to avoid duplicate detections
 	if count == threshold {
-		// Get the route from context if available
+		// Pull the matched route off the request context (stashed by the
+		// tracing middleware), and synthesise a fix hint.
 		var route string
 		if db.Statement.Context != nil {
-			if pulse := PulseFromContext(db.Statement.Context); pulse != nil {
-				// Route info isn't directly on context; we store it via trace ID correlation
-			}
+			route = RouteFromContext(db.Statement.Context)
 		}
 
+		totalDur := duration * time.Duration(count)
 		detection := N1Detection{
 			Pattern:        normalizedSQL,
 			Count:          count,
-			TotalDuration:  duration * time.Duration(count),
+			TotalDuration:  totalDur,
+			AvgDuration:    duration,
 			RequestTraceID: traceID,
 			Route:          route,
+			SuggestedFix:   suggestN1Fix(normalizedSQL),
 			DetectedAt:     time.Now(),
 		}
 
@@ -220,8 +222,16 @@ func (p *PulsePlugin) trackN1(traceID, normalizedSQL string, duration time.Durat
 		}
 
 		if p.pulse.config.DevMode {
-			p.pulse.logger.Printf("[pulse] N+1 detected: %q repeated %d times in request %s",
-				normalizedSQL, count, traceID)
+			if route != "" {
+				p.pulse.logger.Printf("[pulse] N+1 detected in %s (sampled %s): %d× %q",
+					route, traceID, count, normalizedSQL)
+			} else {
+				p.pulse.logger.Printf("[pulse] N+1 detected: %q repeated %d times in request %s",
+					normalizedSQL, count, traceID)
+			}
+			if detection.SuggestedFix != "" {
+				p.pulse.logger.Printf("[pulse]   suggestion: %s", detection.SuggestedFix)
+			}
 		}
 	}
 }
