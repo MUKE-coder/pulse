@@ -19,6 +19,11 @@ func setupTestRouter(cfg ...Config) (*gin.Engine, *Pulse) {
 	if len(cfg) > 0 {
 		c = cfg[0]
 	}
+	// Tests use DevMode so the production guards (default-credentials check,
+	// ephemeral-secret-key warning) don't interfere.
+	if !c.DevMode {
+		c.DevMode = true
+	}
 	p := Mount(router, nil, c)
 
 	// Add test routes

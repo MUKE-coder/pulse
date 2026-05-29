@@ -3,11 +3,13 @@ package pulse
 import (
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -107,8 +109,10 @@ func registerAPIRoutes(router *gin.Engine, p *Pulse) {
 	prefix := p.config.Prefix
 	api := router.Group(prefix + "/api")
 
+	limiter := newLoginLimiter(p.config.Dashboard.LoginRateLimit)
+
 	// Public: auth endpoints
-	api.POST("/auth/login", loginHandler(p))
+	api.POST("/auth/login", loginHandler(p, limiter))
 	api.GET("/auth/verify", authMiddleware(p), verifyHandler())
 
 	// Protected: all other endpoints
@@ -157,6 +161,71 @@ func registerAPIRoutes(router *gin.Engine, p *Pulse) {
 	registerExportRoute(protected, p)
 }
 
+// --- Login rate limiter (per-IP, in-memory token bucket) ---
+
+// loginLimiter throttles login attempts per client IP. Buckets refill linearly
+// over a one-minute window. Buckets that have been idle for >10m are GC'd.
+type loginLimiter struct {
+	mu       sync.Mutex
+	buckets  map[string]*loginBucket
+	capacity int
+}
+
+type loginBucket struct {
+	tokens   int
+	lastSeen time.Time
+}
+
+func newLoginLimiter(capacity int) *loginLimiter {
+	return &loginLimiter{
+		buckets:  make(map[string]*loginBucket),
+		capacity: capacity,
+	}
+}
+
+// allow returns true if the IP has remaining tokens. It refills tokens
+// proportionally to the elapsed wall-clock time since the last attempt.
+func (l *loginLimiter) allow(ip string) bool {
+	if l == nil || l.capacity <= 0 {
+		return true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	now := time.Now()
+	b, ok := l.buckets[ip]
+	if !ok {
+		b = &loginBucket{tokens: l.capacity, lastSeen: now}
+		l.buckets[ip] = b
+	}
+
+	// Refill: full bucket every minute.
+	elapsed := now.Sub(b.lastSeen)
+	refill := int(elapsed / (time.Minute / time.Duration(l.capacity)))
+	if refill > 0 {
+		b.tokens += refill
+		if b.tokens > l.capacity {
+			b.tokens = l.capacity
+		}
+		b.lastSeen = now
+	}
+
+	// Opportunistic GC: drop buckets idle >10m to keep the map bounded.
+	if len(l.buckets) > 1024 {
+		for k, v := range l.buckets {
+			if now.Sub(v.lastSeen) > 10*time.Minute {
+				delete(l.buckets, k)
+			}
+		}
+	}
+
+	if b.tokens <= 0 {
+		return false
+	}
+	b.tokens--
+	return true
+}
+
 // --- Auth handlers ---
 
 type loginRequest struct {
@@ -164,14 +233,26 @@ type loginRequest struct {
 	Password string `json:"password" binding:"required"`
 }
 
-func loginHandler(p *Pulse) gin.HandlerFunc {
+func loginHandler(p *Pulse, limiter *loginLimiter) gin.HandlerFunc {
+	cfgUser := p.config.Dashboard.Username
+	cfgPass := p.config.Dashboard.Password
 	return func(c *gin.Context) {
+		if !limiter.allow(c.ClientIP()) {
+			c.Header("Retry-After", "60")
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many login attempts, try again later"})
+			return
+		}
+
 		var req loginRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "username and password required"})
 			return
 		}
-		if req.Username != p.config.Dashboard.Username || req.Password != p.config.Dashboard.Password {
+
+		// Constant-time comparison to prevent timing side-channel on credentials.
+		userOK := subtle.ConstantTimeCompare([]byte(req.Username), []byte(cfgUser)) == 1
+		passOK := subtle.ConstantTimeCompare([]byte(req.Password), []byte(cfgPass)) == 1
+		if !(userOK && passOK) {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 			return
 		}

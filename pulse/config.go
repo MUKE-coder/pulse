@@ -3,17 +3,32 @@ package pulse
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"os"
+	"path/filepath"
 	"time"
 )
 
-// StorageDriver represents the storage backend type.
+// Version is the current Pulse SDK version, bumped on each release.
+const Version = "0.1.0"
+
+// DefaultUsername is the placeholder dashboard username shipped in defaults.
+// In production (DevMode=false) Pulse refuses to start while this value is in
+// use unless AllowDefaultCredentials is explicitly set.
+const DefaultUsername = "admin"
+
+// DefaultPassword is the placeholder dashboard password shipped in defaults.
+// See DefaultUsername.
+const DefaultPassword = "pulse"
+
+// StorageDriver selects the storage backend.
+//
+// Only [Memory] is implemented as of v0.1.0. A SQLite-backed persistent driver
+// is planned for v1.0.0 — see CHANGELOG.md.
 type StorageDriver int
 
 const (
 	// Memory is the default in-memory storage backend using ring buffers.
 	Memory StorageDriver = iota
-	// SQLite uses modernc.org/sqlite for persistent storage.
-	SQLite
 )
 
 // Config holds all configuration for Pulse.
@@ -61,17 +76,31 @@ type DashboardConfig struct {
 	Username string
 	// Password for dashboard login (default: "pulse").
 	Password string
-	// SecretKey is the JWT signing key. Auto-generated if empty.
+	// SecretKey is the JWT signing key. If empty, Pulse falls back to
+	// SecretKeyFile (if set) or generates an ephemeral key.
 	SecretKey string
+	// SecretKeyFile is a path to a file holding the JWT signing key.
+	// If the file exists it is loaded; if it does not, a freshly generated
+	// key is written to it (0600). Lets tokens survive restarts without
+	// putting the secret in source.
+	SecretKeyFile string
+	// AllowDefaultCredentials lets Pulse start in production (DevMode=false)
+	// even when Username/Password are unchanged from the shipped defaults.
+	// Only set this if you have explicit out-of-band protection (e.g. a
+	// network-level allowlist in front of the dashboard).
+	AllowDefaultCredentials bool
+	// LoginRateLimit caps successful + failed login attempts per client IP
+	// per minute (default: 10). Zero disables rate limiting.
+	LoginRateLimit int
 }
 
 // StorageConfig configures the storage backend.
 type StorageConfig struct {
 	// Driver selects the storage backend (default: Memory).
+	// As of v0.1.0 only Memory is implemented.
 	Driver StorageDriver
-	// DSN is the SQLite database path (default: "pulse.db").
-	DSN string
 	// RetentionHours sets data retention period (default: 24).
+	// A background sweeper drops error/alert/N+1 records older than this.
 	RetentionHours int
 }
 
@@ -225,13 +254,15 @@ func DefaultConfig() Config {
 		Prefix:  "/pulse",
 		AppName: "Pulse",
 		Dashboard: DashboardConfig{
-			Username:  "admin",
-			Password:  "pulse",
-			SecretKey: generateSecretKey(),
+			Username:       DefaultUsername,
+			Password:       DefaultPassword,
+			LoginRateLimit: 10,
+			// SecretKey is left empty here so DefaultConfig() is cheap and
+			// deterministic; resolveSecretKey() generates or loads one inside
+			// applyDefaults() only when no user-provided key is present.
 		},
 		Storage: StorageConfig{
 			Driver:         Memory,
-			DSN:            "pulse.db",
 			RetentionHours: 24,
 		},
 		Tracing: TracingConfig{
@@ -293,14 +324,13 @@ func applyDefaults(cfg Config) Config {
 	if cfg.Dashboard.Password == "" {
 		cfg.Dashboard.Password = defaults.Dashboard.Password
 	}
-	if cfg.Dashboard.SecretKey == "" {
-		cfg.Dashboard.SecretKey = defaults.Dashboard.SecretKey
+	if cfg.Dashboard.LoginRateLimit == 0 {
+		cfg.Dashboard.LoginRateLimit = defaults.Dashboard.LoginRateLimit
 	}
+	// SecretKey is resolved separately by resolveSecretKey() in mount.go so
+	// we only touch the filesystem / RNG when a key is actually required.
 
 	// Storage
-	if cfg.Storage.DSN == "" {
-		cfg.Storage.DSN = defaults.Storage.DSN
-	}
 	if cfg.Storage.RetentionHours == 0 {
 		cfg.Storage.RetentionHours = defaults.Storage.RetentionHours
 	}
@@ -414,4 +444,59 @@ func generateSecretKey() string {
 		return "pulse-default-secret-key-change-me"
 	}
 	return hex.EncodeToString(b)
+}
+
+// resolveSecretKey returns the JWT signing key Pulse should use, applying
+// the following precedence:
+//
+//  1. cfg.Dashboard.SecretKey if non-empty.
+//  2. The contents of cfg.Dashboard.SecretKeyFile if it exists; otherwise a
+//     freshly generated key is written to that path (mode 0600).
+//  3. A freshly generated ephemeral key.
+//
+// It returns the resolved key plus an `ephemeral` flag indicating whether
+// the key will be lost on restart — callers can use this to warn.
+func resolveSecretKey(cfg DashboardConfig) (key string, ephemeral bool, err error) {
+	if cfg.SecretKey != "" {
+		return cfg.SecretKey, false, nil
+	}
+
+	if cfg.SecretKeyFile != "" {
+		path := cfg.SecretKeyFile
+		data, readErr := os.ReadFile(path)
+		if readErr == nil {
+			k := string(data)
+			// Tolerate accidental trailing whitespace from manual edits.
+			k = trimTrailingWhitespace(k)
+			if k != "" {
+				return k, false, nil
+			}
+		} else if !os.IsNotExist(readErr) {
+			return "", false, readErr
+		}
+
+		// File missing (or empty) — create it.
+		k := generateSecretKey()
+		if mkErr := os.MkdirAll(filepath.Dir(path), 0o700); mkErr != nil && !os.IsExist(mkErr) {
+			return "", false, mkErr
+		}
+		if writeErr := os.WriteFile(path, []byte(k), 0o600); writeErr != nil {
+			return "", false, writeErr
+		}
+		return k, false, nil
+	}
+
+	return generateSecretKey(), true, nil
+}
+
+func trimTrailingWhitespace(s string) string {
+	for len(s) > 0 {
+		c := s[len(s)-1]
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+			s = s[:len(s)-1]
+			continue
+		}
+		break
+	}
+	return s
 }

@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/MUKE-coder/pulse/ui"
 	"github.com/gin-gonic/gin"
@@ -29,11 +30,41 @@ func Mount(router *gin.Engine, db *gorm.DB, configs ...Config) *Pulse {
 	}
 	cfg = applyDefaults(cfg)
 
+	// Resolve the JWT signing key now, since several subsystems depend on it.
+	key, ephemeral, err := resolveSecretKey(cfg.Dashboard)
+	if err != nil {
+		log.Fatalf("[pulse] failed to resolve dashboard secret key: %v", err)
+	}
+	cfg.Dashboard.SecretKey = key
+
+	// Refuse to start in production with the shipped default credentials.
+	// Operators who genuinely want the defaults (e.g. behind a private VPN)
+	// can opt in via Dashboard.AllowDefaultCredentials.
+	if !cfg.DevMode &&
+		cfg.Dashboard.Username == DefaultUsername &&
+		cfg.Dashboard.Password == DefaultPassword &&
+		!cfg.Dashboard.AllowDefaultCredentials {
+		log.Fatalf("[pulse] refusing to start: dashboard is using the default credentials %q/%q in production " +
+			"(DevMode=false). Set Dashboard.Username and Dashboard.Password to non-default values, " +
+			"or set Dashboard.AllowDefaultCredentials=true to override.",
+			DefaultUsername, DefaultPassword)
+	}
+	if ephemeral && !cfg.DevMode {
+		log.Printf("[pulse] warning: no Dashboard.SecretKey or Dashboard.SecretKeyFile configured — " +
+			"using an ephemeral JWT signing key. All issued tokens will be invalidated on restart. " +
+			"Set Dashboard.SecretKeyFile to persist the key.")
+	}
+
 	// Create the Pulse engine
 	p := newPulse(cfg)
 
 	// Initialize storage
 	p.storage = NewMemoryStorage(cfg.AppName)
+
+	// Start retention sweeper (drops error/alert/N+1 records older than
+	// Storage.RetentionHours). Ring buffers self-trim, so this is only
+	// useful for the unbounded maps in MemoryStorage.
+	startRetentionSweeper(p)
 
 	// Register GORM query tracking plugin
 	if db != nil && boolValue(cfg.Database.Enabled) {
@@ -112,6 +143,40 @@ func Mount(router *gin.Engine, db *gorm.DB, configs ...Config) *Pulse {
 	}
 
 	return p
+}
+
+// startRetentionSweeper launches a background goroutine that periodically
+// runs storage.Cleanup(retention). Ring buffers self-trim by overwriting
+// oldest entries, but the unbounded maps (error fingerprints, alert log,
+// N+1 detections) need an explicit sweep.
+func startRetentionSweeper(p *Pulse) {
+	hours := p.config.Storage.RetentionHours
+	if hours <= 0 || p.storage == nil {
+		return
+	}
+	retention := time.Duration(hours) * time.Hour
+
+	// Sweep interval: fast enough to keep things tidy, slow enough to be
+	// negligible. One minute is the same cadence Prometheus uses.
+	interval := time.Minute
+	if p.config.DevMode {
+		interval = 10 * time.Second
+	}
+
+	p.startBackground("retention-sweeper", func(ctx context.Context) {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := p.storage.Cleanup(retention); err != nil && p.config.DevMode {
+					p.logger.Printf("[pulse] retention sweep error: %v", err)
+				}
+			}
+		}
+	})
 }
 
 // registerDashboardRoutes serves the embedded React dashboard or falls back to a placeholder.
@@ -294,11 +359,8 @@ func placeholderHTML(cfg Config) string {
 }
 
 func storageDriverName(d StorageDriver) string {
-	switch d {
-	case SQLite:
-		return "SQLite"
-	default:
-		return "Memory"
-	}
+	// Only Memory is implemented in v0.1.0. Future drivers add cases here.
+	_ = d
+	return "Memory"
 }
 

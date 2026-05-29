@@ -47,10 +47,18 @@ func setupWSPulse(t *testing.T) (*Pulse, *gin.Engine) {
 	return p, router
 }
 
-// wsConnect establishes a WebSocket connection to the test server.
-func wsConnect(t *testing.T, server *httptest.Server) *websocket.Conn {
+// wsConnect establishes a WebSocket connection to the test server, signing a
+// fresh JWT against the supplied Pulse's configured signing key so the
+// auth-gated handshake succeeds.
+func wsConnect(t *testing.T, server *httptest.Server, p *Pulse) *websocket.Conn {
 	t.Helper()
-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/pulse/ws/live"
+	token := signJWT(jwtClaims{
+		Username: "test",
+		Iat:      time.Now().Unix(),
+		Exp:      time.Now().Add(time.Hour).Unix(),
+	}, p.config.Dashboard.SecretKey)
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/pulse/ws/live?token=" + token
 	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatalf("ws dial failed: %v", err)
@@ -70,7 +78,7 @@ func TestWebSocketHub_ClientRegistration(t *testing.T) {
 		t.Fatalf("expected 0 clients, got %d", p.wsHub.ClientCount())
 	}
 
-	conn := wsConnect(t, server)
+	conn := wsConnect(t, server, p)
 	defer conn.Close()
 
 	// Give time for registration to propagate
@@ -96,7 +104,7 @@ func TestWebSocketHub_MultipleClients(t *testing.T) {
 	const numClients = 5
 	conns := make([]*websocket.Conn, numClients)
 	for i := 0; i < numClients; i++ {
-		conns[i] = wsConnect(t, server)
+		conns[i] = wsConnect(t, server, p)
 		defer conns[i].Close()
 	}
 
@@ -124,7 +132,7 @@ func TestWebSocketHub_BroadcastMessage(t *testing.T) {
 	server := httptest.NewServer(router)
 	defer server.Close()
 
-	conn := wsConnect(t, server)
+	conn := wsConnect(t, server, p)
 	defer conn.Close()
 
 	time.Sleep(100 * time.Millisecond)
@@ -172,7 +180,7 @@ func TestWebSocketHub_BroadcastError(t *testing.T) {
 	server := httptest.NewServer(router)
 	defer server.Close()
 
-	conn := wsConnect(t, server)
+	conn := wsConnect(t, server, p)
 	defer conn.Close()
 	time.Sleep(100 * time.Millisecond)
 
@@ -210,7 +218,7 @@ func TestWebSocketHub_BroadcastHealth(t *testing.T) {
 	server := httptest.NewServer(router)
 	defer server.Close()
 
-	conn := wsConnect(t, server)
+	conn := wsConnect(t, server, p)
 	defer conn.Close()
 	time.Sleep(100 * time.Millisecond)
 
@@ -247,7 +255,7 @@ func TestWebSocketHub_BroadcastAlert(t *testing.T) {
 	server := httptest.NewServer(router)
 	defer server.Close()
 
-	conn := wsConnect(t, server)
+	conn := wsConnect(t, server, p)
 	defer conn.Close()
 	time.Sleep(100 * time.Millisecond)
 
@@ -283,7 +291,7 @@ func TestWebSocketHub_BroadcastRuntime(t *testing.T) {
 	server := httptest.NewServer(router)
 	defer server.Close()
 
-	conn := wsConnect(t, server)
+	conn := wsConnect(t, server, p)
 	defer conn.Close()
 	time.Sleep(100 * time.Millisecond)
 
@@ -320,7 +328,7 @@ func TestWebSocketHub_ChannelSubscription(t *testing.T) {
 	server := httptest.NewServer(router)
 	defer server.Close()
 
-	conn := wsConnect(t, server)
+	conn := wsConnect(t, server, p)
 	defer conn.Close()
 	time.Sleep(100 * time.Millisecond)
 
@@ -370,7 +378,7 @@ func TestWebSocketHub_DefaultSubscribesAll(t *testing.T) {
 	server := httptest.NewServer(router)
 	defer server.Close()
 
-	conn := wsConnect(t, server)
+	conn := wsConnect(t, server, p)
 	defer conn.Close()
 	time.Sleep(100 * time.Millisecond)
 
@@ -402,7 +410,7 @@ func TestWebSocketHub_ConcurrentBroadcast(t *testing.T) {
 
 	conns := make([]*websocket.Conn, numClients)
 	for i := 0; i < numClients; i++ {
-		conns[i] = wsConnect(t, server)
+		conns[i] = wsConnect(t, server, p)
 		defer conns[i].Close()
 	}
 	time.Sleep(100 * time.Millisecond)
@@ -467,7 +475,7 @@ func TestWebSocketHub_OverviewBroadcast(t *testing.T) {
 	server := httptest.NewServer(router)
 	defer server.Close()
 
-	conn := wsConnect(t, server)
+	conn := wsConnect(t, server, p)
 	defer conn.Close()
 	time.Sleep(100 * time.Millisecond)
 
@@ -499,7 +507,7 @@ func TestWebSocketHub_MultiSubscription(t *testing.T) {
 	server := httptest.NewServer(router)
 	defer server.Close()
 
-	conn := wsConnect(t, server)
+	conn := wsConnect(t, server, p)
 	defer conn.Close()
 	time.Sleep(100 * time.Millisecond)
 

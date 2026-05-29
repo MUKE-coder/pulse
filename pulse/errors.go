@@ -2,9 +2,11 @@ package pulse
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"runtime"
 	"strings"
 	"time"
@@ -25,12 +27,120 @@ const (
 
 // Sensitive header names that should be redacted in request context.
 var sensitiveHeaders = map[string]bool{
-	"authorization":   true,
-	"cookie":          true,
-	"set-cookie":      true,
-	"x-api-key":       true,
-	"x-auth-token":    true,
+	"authorization":       true,
+	"cookie":              true,
+	"set-cookie":          true,
+	"x-api-key":           true,
+	"x-auth-token":        true,
 	"proxy-authorization": true,
+}
+
+// sensitiveBodyFields are field names whose values are redacted in captured
+// request bodies. Matching is case-insensitive and exact-on-name (not
+// substring), so a field named `description` is not flagged just because it
+// contains "secret" as a substring. Add to this list as needed.
+var sensitiveBodyFields = map[string]bool{
+	"password":              true,
+	"pass":                  true,
+	"passwd":                true,
+	"new_password":          true,
+	"current_password":      true,
+	"old_password":          true,
+	"password_confirmation": true,
+	"secret":                true,
+	"client_secret":         true,
+	"token":                 true,
+	"access_token":          true,
+	"refresh_token":         true,
+	"id_token":              true,
+	"api_key":               true,
+	"apikey":                true,
+	"authorization":         true,
+	"auth":                  true,
+	"private_key":           true,
+	"ssn":                   true,
+	"card_number":           true,
+	"cardnumber":            true,
+	"cc_number":             true,
+	"cvv":                   true,
+	"cvc":                   true,
+	"pin":                   true,
+}
+
+const redactedPlaceholder = "[REDACTED]"
+
+// redactBody returns a redacted copy of body suitable for capture.
+//
+// Behaviour by content type:
+//   - application/json (or */*+json): parsed, sensitive field values replaced.
+//     A field named one of sensitiveBodyFields has its value swapped for the
+//     literal "[REDACTED]" regardless of depth.
+//   - application/x-www-form-urlencoded: same treatment per form key.
+//   - everything else: returned unchanged (caller already limits size).
+//
+// On parse failure the original bytes are returned — losing structured
+// redaction is better than losing the body entirely, and the request was
+// already malformed enough to error out.
+func redactBody(contentType string, body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	ct := strings.ToLower(contentType)
+	// Strip parameters (e.g., "; charset=utf-8") and any leading whitespace.
+	if i := strings.Index(ct, ";"); i >= 0 {
+		ct = ct[:i]
+	}
+	ct = strings.TrimSpace(ct)
+
+	switch {
+	case ct == "application/json" || strings.HasSuffix(ct, "+json"):
+		var v interface{}
+		if err := json.Unmarshal(body, &v); err != nil {
+			return body
+		}
+		redacted := redactJSON(v)
+		out, err := json.Marshal(redacted)
+		if err != nil {
+			return body
+		}
+		return out
+
+	case ct == "application/x-www-form-urlencoded":
+		values, err := url.ParseQuery(string(body))
+		if err != nil {
+			return body
+		}
+		for k := range values {
+			if sensitiveBodyFields[strings.ToLower(k)] {
+				values.Set(k, redactedPlaceholder)
+			}
+		}
+		return []byte(values.Encode())
+	}
+
+	return body
+}
+
+// redactJSON walks a decoded JSON value and replaces values of sensitive
+// fields with the redaction placeholder. Maps and slices are descended into.
+func redactJSON(v interface{}) interface{} {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		for k, val := range t {
+			if sensitiveBodyFields[strings.ToLower(k)] {
+				t[k] = redactedPlaceholder
+				continue
+			}
+			t[k] = redactJSON(val)
+		}
+		return t
+	case []interface{}:
+		for i, val := range t {
+			t[i] = redactJSON(val)
+		}
+		return t
+	}
+	return v
 }
 
 // newErrorMiddleware creates a Gin middleware that recovers from panics, captures
@@ -307,7 +417,7 @@ func captureRequestContext(c *gin.Context, bodyBytes []byte) *RequestContext {
 	}
 
 	if len(bodyBytes) > 0 {
-		reqCtx.Body = string(bodyBytes)
+		reqCtx.Body = string(redactBody(c.ContentType(), bodyBytes))
 	}
 
 	return reqCtx

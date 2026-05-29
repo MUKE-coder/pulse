@@ -143,7 +143,7 @@ func main() {
     // Dashboard:  http://localhost:8080/pulse/ui/
     // API:        http://localhost:8080/pulse/api/
     // Health:     http://localhost:8080/pulse/health
-    // WebSocket:  ws://localhost:8080/pulse/ws/live
+    // WebSocket:  ws://localhost:8080/pulse/ws/live?token=<jwt>  (auth required)
     // Login:      admin / pulse (default credentials)
     log.Fatal(router.Run(":8080"))
 }
@@ -182,15 +182,33 @@ pulse.Mount(router, db, pulse.Config{
 
 ### Dashboard Authentication
 
-The REST API is protected with JWT tokens. Login to get a token, then include it as a `Bearer` header.
+The REST API and the live WebSocket are both protected with JWT tokens. Login to get a token, then include it as a `Bearer` header on REST calls (or as `?token=…` on the WebSocket).
 
 ```go
 Dashboard: pulse.DashboardConfig{
-    Username:  "admin",       // default: "admin"
-    Password:  "pulse",       // default: "pulse"
-    SecretKey: "my-secret",   // auto-generated if empty
+    Username:       "admin",         // default: "admin" (see warning below)
+    Password:       "pulse",         // default: "pulse" (see warning below)
+    SecretKey:      "my-secret",     // prefer SecretKeyFile in production
+    SecretKeyFile:  "/var/lib/pulse/secret.key", // loaded if exists, else created (0600)
+    LoginRateLimit: 10,              // login attempts/minute per IP (default: 10; 0 disables)
+
+    // Optional escape hatch: lets Pulse start in production with the shipped
+    // default credentials. Only use this behind a private network.
+    AllowDefaultCredentials: false,
 },
 ```
+
+#### Default credentials are blocked in production
+
+Pulse ships with `admin` / `pulse` as a convenience for the demo. In production (`DevMode=false`) Pulse **refuses to start** while those values are still in use unless `Dashboard.AllowDefaultCredentials` is explicitly set to `true`. Set a strong password — or, ideally, source it from your secrets manager — before deploying.
+
+#### Persistent JWT signing key
+
+If you do not set `Dashboard.SecretKey`, Pulse falls back to `Dashboard.SecretKeyFile`. If that file exists, the key is loaded from it; if it does not exist, a fresh 256-bit key is generated and written to that path with mode `0600`. With neither field set, Pulse uses an in-memory key — **every restart invalidates all live tokens**, and a warning is logged in production.
+
+#### Login rate limit
+
+`/pulse/api/auth/login` is throttled per client IP via an in-memory token bucket. Default cap is 10 attempts per minute; configurable via `Dashboard.LoginRateLimit` (zero disables it). When exceeded, Pulse returns `429 Too Many Requests` with a `Retry-After: 60` header.
 
 **Login:**
 
@@ -213,13 +231,14 @@ curl http://localhost:8080/pulse/api/overview \
 
 ```go
 Storage: pulse.StorageConfig{
-    Driver:         pulse.Memory,   // pulse.Memory (default) or pulse.SQLite
-    DSN:            "pulse.db",     // SQLite file path (default: "pulse.db")
+    Driver:         pulse.Memory,   // only Memory is implemented in v0.1.0
     RetentionHours: 24,             // Data retention in hours (default: 24)
 },
 ```
 
-The default in-memory storage uses lock-free ring buffers with ~100K request capacity. For persistence across restarts, use `pulse.SQLite`.
+The in-memory storage uses lock-free ring buffers with ~100K request capacity. A background **retention sweeper** runs every minute (every 10 s in `DevMode`) to drop error fingerprints, alerts, and N+1 detections older than `RetentionHours`. Ring buffers self-trim by overwriting their oldest entries.
+
+> **Persistence on the roadmap.** A SQLite-backed persistent storage driver is planned for `v1.0.0` (see [CHANGELOG.md](CHANGELOG.md#roadmap)). It is not available in `v0.1.0` — the previous `pulse.SQLite` enum value has been removed to avoid silently falling back to `Memory`.
 
 ### Request Tracing
 
@@ -462,7 +481,12 @@ Captured per-dependency: request count, error count, error rate, availability, a
 
 ## WebSocket Live Updates
 
-Connect to `ws://localhost:8080/pulse/ws/live` for real-time streaming.
+Connect to `ws://localhost:8080/pulse/ws/live?token=<jwt>` for real-time streaming. The WebSocket endpoint requires the same JWT that protects `/pulse/api`. Two ways to supply it:
+
+- **Browsers / dashboards:** append `?token=<jwt>` to the URL — browsers cannot set `Authorization` on the upgrade request.
+- **Non-browser clients:** send `Sec-WebSocket-Protocol: bearer, <jwt>` as the subprotocol header. Pulse will negotiate `bearer` back to you.
+
+Unauthenticated upgrade attempts receive `401 Unauthorized` before the handshake completes.
 
 **Subscribe to specific channels:**
 
@@ -916,6 +940,18 @@ p.Shutdown()
 This stops all background goroutines (runtime sampler, aggregator, health runner, alert engine, WebSocket hub) and waits for them to finish.
 
 ---
+
+## Versioning & Roadmap
+
+Pulse follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The current version is exposed as `pulse.Version`. See [CHANGELOG.md](CHANGELOG.md) for the full release history; the short version of what is coming next:
+
+| Version | Theme |
+|---------|-------|
+| `v0.2.0` | Functional-options API, `context.Context` on the public surface, W3C `traceparent` propagation |
+| `v0.3.0` | SLO objects + burn-rate alerts ([#1](https://github.com/MUKE-coder/pulse/issues/1)) |
+| `v0.4.0` | N+1 detector enhancements ([#2](https://github.com/MUKE-coder/pulse/issues/2)) + USE method dashboard ([#3](https://github.com/MUKE-coder/pulse/issues/3)) |
+| `v0.5.0` | k6 test-run overlay + pprof flame graph ([#4](https://github.com/MUKE-coder/pulse/issues/4)) |
+| `v1.0.0` | Persistent SQLite storage backend, dashboard ported to Tailwind, public API freeze |
 
 ## License
 

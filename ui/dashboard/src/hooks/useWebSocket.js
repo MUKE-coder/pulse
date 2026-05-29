@@ -1,14 +1,18 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
+import { useAuth } from '../context/AuthContext'
 
 export function useWebSocket(channels = []) {
+  const { token } = useAuth()
   const wsRef = useRef(null)
   const [lastMessage, setLastMessage] = useState(null)
   const [connected, setConnected] = useState(false)
   const reconnectTimer = useRef(null)
 
   const connect = useCallback(() => {
+    if (!token) return
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const ws = new WebSocket(`${proto}//${window.location.host}/pulse/ws/live`)
+    const url = `${proto}//${window.location.host}/pulse/ws/live?token=${encodeURIComponent(token)}`
+    const ws = new WebSocket(url)
     wsRef.current = ws
 
     ws.onopen = () => {
@@ -31,7 +35,7 @@ export function useWebSocket(channels = []) {
     }
 
     ws.onerror = () => ws.close()
-  }, [channels])
+  }, [channels, token])
 
   useEffect(() => {
     connect()

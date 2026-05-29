@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -313,6 +314,15 @@ func (c *Client) writePump() {
 // --- WebSocket Route Registration ---
 
 // registerWebSocketRoute registers the WS endpoint on the router.
+//
+// Auth: the WebSocket endpoint requires the same JWT that protects /pulse/api.
+// Browsers cannot set Authorization on the upgrade request, so Pulse accepts
+// the token via either:
+//
+//   - the `?token=<jwt>` query parameter, or
+//   - the `Sec-WebSocket-Protocol: bearer,<jwt>` subprotocol header.
+//
+// Requests without a valid token are rejected with 401 before the upgrade.
 func registerWebSocketRoute(router *gin.Engine, p *Pulse) {
 	prefix := p.config.Prefix
 
@@ -322,7 +332,24 @@ func registerWebSocketRoute(router *gin.Engine, p *Pulse) {
 			return
 		}
 
-		conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+		token := extractWSToken(c)
+		if token == "" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing token"})
+			return
+		}
+		if _, err := verifyJWT(token, p.config.Dashboard.SecretKey); err != nil {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			return
+		}
+
+		// If the client used the subprotocol form, we must echo a chosen
+		// subprotocol back in the handshake. We negotiate "bearer".
+		var responseHeader http.Header
+		if c.GetHeader("Sec-WebSocket-Protocol") != "" {
+			responseHeader = http.Header{"Sec-WebSocket-Protocol": []string{"bearer"}}
+		}
+
+		conn, err := upgrader.Upgrade(c.Writer, c.Request, responseHeader)
 		if err != nil {
 			if p.config.DevMode {
 				p.logger.Printf("[pulse] ws upgrade failed: %v", err)
@@ -343,6 +370,35 @@ func registerWebSocketRoute(router *gin.Engine, p *Pulse) {
 		go client.writePump()
 		go client.readPump()
 	})
+}
+
+// extractWSToken pulls a bearer token off either the `?token=` query param
+// or the `Sec-WebSocket-Protocol: bearer,<jwt>` subprotocol header.
+func extractWSToken(c *gin.Context) string {
+	if t := c.Query("token"); t != "" {
+		return t
+	}
+	proto := c.GetHeader("Sec-WebSocket-Protocol")
+	if proto == "" {
+		return ""
+	}
+	// Browsers send a comma-separated list of subprotocols. Convention used
+	// here: ["bearer", "<jwt>"]. Anything else is ignored.
+	parts := strings.Split(proto, ",")
+	var sawBearer bool
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if !sawBearer {
+			if strings.EqualFold(p, "bearer") {
+				sawBearer = true
+			}
+			continue
+		}
+		if p != "" {
+			return p
+		}
+	}
+	return ""
 }
 
 // --- Broadcast Helpers (called from subsystems) ---
