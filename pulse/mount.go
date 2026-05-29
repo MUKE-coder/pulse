@@ -128,6 +128,13 @@ func Mount(ctx context.Context, router *gin.Engine, db *gorm.DB, opts ...Option)
 		p.useSampler = newUSESampler(p)
 	}
 
+	// Construct the profile sampler if profiling has been opted into at the
+	// config level. The runtime gate (env var) is still checked on every
+	// request, so this is a no-op when only one half is set.
+	if boolValue(cfg.Profiling.Enabled) {
+		p.profileSampler = newProfileSampler(p)
+	}
+
 	// Register error tracking middleware (outermost — catches panics from all handlers)
 	if boolValue(cfg.Errors.Enabled) {
 		router.Use(newErrorMiddleware(p))

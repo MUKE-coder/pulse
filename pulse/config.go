@@ -9,7 +9,7 @@ import (
 )
 
 // Version is the current Pulse SDK version, bumped on each release.
-const Version = "0.4.0"
+const Version = "0.5.0"
 
 // DefaultUsername is the placeholder dashboard username shipped in defaults.
 // In production (DevMode=false) Pulse refuses to start while this value is in
@@ -74,8 +74,34 @@ type Config struct {
 	// USE configures the USE-method host-resource sampler.
 	USE USEConfig
 
+	// Profiling configures the optional CPU-profile / flame-graph endpoint.
+	Profiling ProfilingConfig
+
 	// DevMode enables verbose logging and more frequent aggregation.
 	DevMode bool
+}
+
+// ProfilingConfig gates the on-demand CPU profile + flame graph endpoint.
+//
+// Profiling is OFF by default and requires TWO opt-ins to enable, by design:
+//
+//  1. Set Profiling.Enabled to true in code.
+//  2. Set the [ProfileEnabledEnv] environment variable to a truthy value
+//     ("1", "true", "yes", "on") at runtime.
+//
+// Either alone is insufficient. CPU profiles leak code structure, so a
+// rogue config edit alone should not be able to turn them on in production.
+type ProfilingConfig struct {
+	// Enabled toggles the config-side opt-in. Default: false.
+	Enabled *bool
+	// DefaultDuration is the default sample window length when the API
+	// caller does not supply one. Default: 10s.
+	DefaultDuration time.Duration
+	// MaxDuration caps the sample window length the API will accept. Zero
+	// means "no cap". Default: 60s.
+	MaxDuration time.Duration
+	// SampleHz is the per-second stack sample rate. Default: 100.
+	SampleHz int
 }
 
 // USEConfig configures Brendan Gregg's USE-method dashboard (Utilization /
@@ -327,6 +353,12 @@ func DefaultConfig() Config {
 		USE: USEConfig{
 			Enabled: boolPtr(true),
 		},
+		Profiling: ProfilingConfig{
+			Enabled:         boolPtr(false), // OFF by default — see ProfilingConfig docs
+			DefaultDuration: 10 * time.Second,
+			MaxDuration:     60 * time.Second,
+			SampleHz:        100,
+		},
 		DevMode: false,
 	}
 }
@@ -440,6 +472,20 @@ func applyDefaults(cfg Config) Config {
 	// USE
 	if cfg.USE.Enabled == nil {
 		cfg.USE.Enabled = defaults.USE.Enabled
+	}
+
+	// Profiling
+	if cfg.Profiling.Enabled == nil {
+		cfg.Profiling.Enabled = defaults.Profiling.Enabled
+	}
+	if cfg.Profiling.DefaultDuration == 0 {
+		cfg.Profiling.DefaultDuration = defaults.Profiling.DefaultDuration
+	}
+	if cfg.Profiling.MaxDuration == 0 {
+		cfg.Profiling.MaxDuration = defaults.Profiling.MaxDuration
+	}
+	if cfg.Profiling.SampleHz == 0 {
+		cfg.Profiling.SampleHz = defaults.Profiling.SampleHz
 	}
 
 	return cfg

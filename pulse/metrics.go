@@ -309,6 +309,24 @@ type DependencyStats struct {
 	LastChecked  time.Time     `json:"last_checked"`
 }
 
+// TestRun records a synthetic load-test execution (k6, Vegeta, or any tool
+// that POSTs to /pulse/api/test-runs). The dashboard overlays test runs as
+// vertical bands on the latency / RPS / error-rate timelines so operators
+// can see "the spike test ran from t to t+9m, here's what production
+// p95 did during that window."
+//
+// ID is assigned by the server when StartedAt is in the future or zero (a
+// "starting" run); for a one-shot record both timestamps are supplied by
+// the caller.
+type TestRun struct {
+	ID        string                 `json:"id"`
+	Name      string                 `json:"name"`
+	Type      string                 `json:"type"`             // "k6.average-load", "vegeta", custom
+	StartedAt time.Time              `json:"started_at"`
+	EndedAt   time.Time              `json:"ended_at,omitempty"`
+	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+}
+
 // Overview is the top-level dashboard snapshot.
 type Overview struct {
 	AppName          string            `json:"app_name"`

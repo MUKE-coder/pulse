@@ -433,6 +433,71 @@ The two-phase transition (OK -> Pending -> Firing) prevents false alerts from tr
 - `goroutine_growth` — Goroutine growth rate per hour
 - `health_status` — Composite health check status (1 = healthy, 0 = unhealthy)
 
+### Flame graph (profiling)
+
+Pulse can sample live goroutine stacks on demand and return either an interactive **SVG flame graph** or the standard Brendan Gregg folded-stack text format. CPU profiles leak code structure, so this feature is **off by default** and **double-gated** — you must opt in *both* at the code level *and* at the environment level:
+
+```go
+pulse.Mount(ctx, router, db,
+    pulse.WithProfiling(),       // gate 1
+    // ...
+)
+```
+
+```bash
+export PULSE_PROFILE_ENABLED=true   # gate 2
+```
+
+Either gate alone returns `503` with a hint at the missing one. With both set:
+
+```bash
+# 10-second window at 100 Hz, returned as SVG
+curl -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8080/pulse/api/profile/flamegraph > flame.svg
+
+# 5-second window, returned as folded text for diff-flame tooling
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8080/pulse/api/profile/folded?duration=5s" \
+  | ./difffolded.pl - other.folded \
+  | ./flamegraph.pl --colors=red > diff.svg
+```
+
+Only one sample window is active at a time. Concurrent requests get `409 Conflict` — running two profiles simultaneously doubles CPU cost and produces overlapping noise. Override the defaults in code via `Config.Profiling.DefaultDuration`, `Config.Profiling.MaxDuration`, `Config.Profiling.SampleHz`.
+
+> **Why `runtime.GoroutineProfile` instead of `runtime/pprof`?** Pulse skips the pprof protobuf and walks live goroutine stacks directly. The resulting flame graph emphasises **hot code paths** rather than literal CPU time — which is usually what operators want when chasing a regression. Bonus: no `github.com/google/pprof` tree in your dependency graph.
+
+### k6 test-run overlay
+
+Pulse exposes a `POST /pulse/api/test-runs` endpoint that any load-test harness can call at run start and end. The dashboard then renders each run as a vertical band on the latency / RPS / error charts, labelled with the test name. The killer view is *"when we ran the spike test, p95 climbed from 80 ms → 1100 ms then recovered to 95 ms within 90 s — recovery worked."*
+
+For k6 specifically, drop the bundled bridge into your test directory:
+
+```js
+import {
+  pulseAuth, pulseStartRun, pulseEndRun,
+} from './pulse-k6-bridge.js';
+
+export function setup() {
+  const token = pulseAuth(__ENV.PULSE_URL, __ENV.PULSE_USER, __ENV.PULSE_PASS);
+  const run   = pulseStartRun(__ENV.PULSE_URL, token, {
+    name: 'average-load',
+    type: 'k6.average-load',
+    metadata: { vus_peak: 50 },
+  });
+  return { token, run };
+}
+
+// ... your scenarios ...
+
+export function teardown(data) {
+  pulseEndRun(__ENV.PULSE_URL, data.token, data.run, {
+    thresholds_passed: true,
+  });
+}
+```
+
+The bridge ([`examples/k6/pulse-k6-bridge.js`](examples/k6/pulse-k6-bridge.js)) and a runnable example ([`examples/k6/example-test.js`](examples/k6/example-test.js)) ship in the repo.
+
 ### USE method (host U/S/E grid)
 
 Pulse implements Brendan Gregg's [USE method](https://brendangregg.com/usemethod.html) — for every system resource, walk **U**tilization / **S**aturation / **E**rrors. A background sampler refreshes the grid every 5 s (2 s in DevMode), and `GET /pulse/api/use` returns the live snapshot:
@@ -698,6 +763,22 @@ All endpoints under `/pulse/api/` require JWT authentication (except login).
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/pulse/api/use` | Live USE snapshot — CPU, Memory, Disk, Network, DB pool, Goroutines, each with U/S/E cells colour-banded as `green` / `amber` / `red` / `unknown` |
+
+### Test runs (k6 / load-test overlay)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/pulse/api/test-runs?range=…` | List test runs whose window overlaps the range |
+| `POST` | `/pulse/api/test-runs` | Record a synthetic test run (k6 bridge POSTs here at run start + end) |
+
+### Profiling / flame graph
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/pulse/api/profile/flamegraph?duration=10s&hz=100` | Sample the runtime and return an SVG flame graph. `?format=json` returns the folded tree; `?cache=true` reuses a recent sample if available |
+| `GET` | `/pulse/api/profile/folded` | Same window, but emits Brendan Gregg's folded-stack text format for piping into other tooling |
+
+**Both endpoints are double-gated** — they return `503` unless `pulse.WithProfiling()` is set AND `PULSE_PROFILE_ENABLED=true` is in the environment. See [Profiling section](#flame-graph-profiling).
 
 ### Settings & Data
 
@@ -1039,7 +1120,6 @@ Pulse follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The cu
 
 | Version | Theme |
 |---------|-------|
-| `v0.5.0` | k6 test-run overlay + pprof flame graph ([#4](https://github.com/MUKE-coder/pulse/issues/4)) |
 | `v1.0.0` | Persistent SQLite storage backend, dashboard ported to Tailwind, public API freeze |
 
 ## License

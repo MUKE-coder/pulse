@@ -237,3 +237,16 @@ func WithSLO(slo SLO) Option {
 func WithUSEDisabled() Option {
 	return func(c *Config) { c.USE.Enabled = boolPtr(false) }
 }
+
+// --- Profiling ---
+
+// WithProfiling enables the on-demand CPU profile + flame graph endpoint.
+//
+// This is half of the opt-in — Pulse will still refuse to sample at runtime
+// unless the [ProfileEnabledEnv] env var ("PULSE_PROFILE_ENABLED") is also
+// set to a truthy value. Both gates exist by design: CPU profiles leak
+// code structure, so a rogue config change alone should not be able to
+// enable them in production.
+func WithProfiling() Option {
+	return func(c *Config) { c.Profiling.Enabled = boolPtr(true) }
+}

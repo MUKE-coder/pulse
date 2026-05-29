@@ -39,6 +39,10 @@ type Storage interface {
 	StoreDependencyMetric(m DependencyMetric) error
 	GetDependencyStats(timeRange TimeRange) ([]DependencyStats, error)
 
+	// Test runs (k6 / load-test overlay)
+	StoreTestRun(r TestRun) error
+	GetTestRuns(timeRange TimeRange) ([]TestRun, error)
+
 	// Overview
 	GetOverview(timeRange TimeRange) (*Overview, error)
 

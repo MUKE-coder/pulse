@@ -160,6 +160,14 @@ func registerAPIRoutes(router *gin.Engine, p *Pulse) {
 	// USE method (host U/S/E grid)
 	protected.GET("/use", useHandler(p))
 
+	// Test runs (k6 / load-test overlay)
+	protected.GET("/test-runs", testRunsListHandler(p))
+	protected.POST("/test-runs", testRunsCreateHandler(p))
+
+	// Profiling / flame graph (off by default; double-gated, see profile.go)
+	protected.GET("/profile/flamegraph", profileFlameGraphHandler(p))
+	protected.GET("/profile/folded", profileFoldedHandler(p))
+
 	// Settings & data
 	protected.GET("/settings", settingsHandler(p))
 	protected.POST("/data/reset", dataResetHandler(p))
@@ -623,6 +631,145 @@ func useHandler(p *Pulse) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, p.useSampler.Snapshot())
+	}
+}
+
+// --- Test runs (k6 / load-test overlay) ---
+
+// testRunsListHandler returns recorded test runs in the requested window.
+// Used by the dashboard to render vertical bands on the timeline charts.
+func testRunsListHandler(p *Pulse) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		tr := parseTimeRangeParam(c)
+		runs, _ := p.storage.GetTestRuns(tr)
+		c.JSON(http.StatusOK, runs)
+	}
+}
+
+// --- Profiling (flame graph) ---
+
+// profileFlameGraphHandler runs a sampling window and returns either an
+// interactive SVG flame graph (default) or a JSON representation
+// (?format=json) of the folded tree.
+//
+// Query params:
+//
+//	duration  — sample window, e.g. "5s". Default Config.Profiling.DefaultDuration.
+//	hz        — samples per second. Default Config.Profiling.SampleHz.
+//	width     — SVG width in pixels (svg format only). Default 1400.
+//	format    — "svg" (default) or "json".
+//	cache     — "true" to serve the most recent cached profile if one exists
+//	            and is less than 60s old. Default false (always re-sample).
+//
+// Returns 503 with a remediation hint when profiling is not opted in.
+func profileFlameGraphHandler(p *Pulse) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !profilingPermitted(p.config) {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": "profiling is disabled",
+				"hint":  "set pulse.WithProfiling() AND export " + ProfileEnabledEnv + "=true",
+			})
+			return
+		}
+
+		root, status, err := runOrCacheProfile(c, p)
+		if err != nil {
+			c.JSON(status, gin.H{"error": err.Error()})
+			return
+		}
+
+		switch c.DefaultQuery("format", "svg") {
+		case "json":
+			c.JSON(http.StatusOK, root)
+		default:
+			width := queryInt(c, "width", 1400)
+			svg := FlameGraphSVG(root, width, 16)
+			c.Header("Content-Disposition", "inline; filename=\"pulse-flamegraph.svg\"")
+			c.Data(http.StatusOK, "image/svg+xml", []byte(svg))
+		}
+	}
+}
+
+// profileFoldedHandler returns the Brendan Gregg "folded stack" format so
+// callers can pipe Pulse profiles into flamegraph.pl or differential-
+// flamegraph tools.
+func profileFoldedHandler(p *Pulse) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !profilingPermitted(p.config) {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": "profiling is disabled",
+				"hint":  "set pulse.WithProfiling() AND export " + ProfileEnabledEnv + "=true",
+			})
+			return
+		}
+		root, status, err := runOrCacheProfile(c, p)
+		if err != nil {
+			c.JSON(status, gin.H{"error": err.Error()})
+			return
+		}
+		c.Data(http.StatusOK, "text/plain; charset=utf-8", []byte(Folded(root)))
+	}
+}
+
+// runOrCacheProfile honours the ?cache= query param, picking between a
+// fresh sample window and the most-recent cached tree.
+func runOrCacheProfile(c *gin.Context, p *Pulse) (*FlameNode, int, error) {
+	if c.Query("cache") == "true" {
+		if cached := p.profileSampler.Cached(60 * time.Second); cached != nil {
+			return cached, http.StatusOK, nil
+		}
+	}
+
+	dur, _ := time.ParseDuration(c.Query("duration"))
+	hz := queryInt(c, "hz", 0)
+
+	root, err := p.profileSampler.Sample(c.Request.Context(), dur, hz)
+	if err != nil {
+		// Already-running is a 409, anything else (config flip mid-flight
+		// etc.) is a 503.
+		if strings.Contains(err.Error(), "already") {
+			return nil, http.StatusConflict, err
+		}
+		return nil, http.StatusServiceUnavailable, err
+	}
+	return root, http.StatusOK, nil
+}
+
+// testRunsCreateHandler accepts a test-run record. Intended for k6 (or any
+// load-test harness) to call at run start and run end. Both timestamps may
+// be supplied by the caller — Pulse does not infer them.
+//
+// The request shape matches the example in issue #4:
+//
+//	{ "name": "average-load",
+//	  "type": "k6.average-load",
+//	  "started_at": "2026-05-28T14:30:00Z",
+//	  "ended_at":   "2026-05-28T14:39:00Z",
+//	  "metadata":   { "vus_peak": 100, "thresholds_passed": true } }
+//
+// If ID is omitted, Pulse assigns one.
+func testRunsCreateHandler(p *Pulse) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var run TestRun
+		if err := c.ShouldBindJSON(&run); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid test-run payload: " + err.Error()})
+			return
+		}
+		if run.Name == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "test-run name is required"})
+			return
+		}
+		if run.StartedAt.IsZero() {
+			run.StartedAt = time.Now()
+		}
+		if run.ID == "" {
+			run.ID = GenerateTraceID()
+		}
+		if err := p.storage.StoreTestRun(run); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusCreated, run)
 	}
 }
 

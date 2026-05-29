@@ -42,6 +42,10 @@ type MemoryStorage struct {
 	poolStats *PoolStats
 	poolMu    sync.RWMutex
 
+	// Test runs (k6 / load-test overlay)
+	testRuns   []TestRun
+	testRunsMu sync.RWMutex
+
 	// Config
 	appName   string
 	startTime time.Time
@@ -620,6 +624,46 @@ func (s *MemoryStorage) GetDependencyStats(timeRange TimeRange) ([]DependencySta
 	return result, nil
 }
 
+// --- Test runs ---
+
+// StoreTestRun stores a single test-run record. The slice is capped to
+// keep memory bounded; the oldest entries are dropped when full.
+func (s *MemoryStorage) StoreTestRun(r TestRun) error {
+	s.testRunsMu.Lock()
+	defer s.testRunsMu.Unlock()
+	s.testRuns = append(s.testRuns, r)
+	const cap = 1000
+	if len(s.testRuns) > cap {
+		s.testRuns = s.testRuns[len(s.testRuns)-cap:]
+	}
+	return nil
+}
+
+// GetTestRuns returns every test run whose window overlaps the given range.
+// A run with a zero EndedAt (still in-flight) is included if StartedAt is
+// inside the range.
+func (s *MemoryStorage) GetTestRuns(tr TimeRange) ([]TestRun, error) {
+	s.testRunsMu.RLock()
+	defer s.testRunsMu.RUnlock()
+
+	out := make([]TestRun, 0, len(s.testRuns))
+	for _, r := range s.testRuns {
+		// Window overlap: end-after-start AND start-before-end.
+		end := r.EndedAt
+		if end.IsZero() {
+			end = r.StartedAt
+		}
+		if !tr.Start.IsZero() && end.Before(tr.Start) {
+			continue
+		}
+		if !tr.End.IsZero() && r.StartedAt.After(tr.End) {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out, nil
+}
+
 // --- Overview ---
 
 // GetOverview computes the top-level dashboard snapshot.
@@ -741,6 +785,22 @@ func (s *MemoryStorage) Cleanup(retention time.Duration) error {
 	s.n1Detections = filteredN1
 	s.n1Mu.Unlock()
 
+	// Clean test runs (a run is stale once both StartedAt and EndedAt are
+	// before the cutoff).
+	s.testRunsMu.Lock()
+	filteredTR := s.testRuns[:0]
+	for _, r := range s.testRuns {
+		end := r.EndedAt
+		if end.IsZero() {
+			end = r.StartedAt
+		}
+		if !end.Before(cutoff) {
+			filteredTR = append(filteredTR, r)
+		}
+	}
+	s.testRuns = filteredTR
+	s.testRunsMu.Unlock()
+
 	// Ring buffers handle their own capacity limits; they don't need explicit cleanup
 	// since old entries are naturally overwritten.
 
@@ -773,6 +833,10 @@ func (s *MemoryStorage) Reset() error {
 	s.poolMu.Lock()
 	s.poolStats = nil
 	s.poolMu.Unlock()
+
+	s.testRunsMu.Lock()
+	s.testRuns = nil
+	s.testRunsMu.Unlock()
 
 	return nil
 }

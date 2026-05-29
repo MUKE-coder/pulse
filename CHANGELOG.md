@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.0] — 2026-05-29
+
+Closes [#4](https://github.com/MUKE-coder/pulse/issues/4) — k6 test-run
+timeline overlay + flame graph from sampled stack traces. Additive; no
+breaking changes.
+
+### Added — k6 test-run overlay
+
+- **`pulse.TestRun`** type capturing a synthetic load-test execution
+  (k6, Vegeta, custom harness). Stored in MemoryStorage with a 1000-record
+  cap; subject to the same retention sweeper as everything else.
+- **`POST /pulse/api/test-runs`** (auth-required) accepts the JSON shape
+  from the issue:
+  ```json
+  { "name": "average-load", "type": "k6.average-load",
+    "started_at": "...", "ended_at": "...",
+    "metadata": { "vus_peak": 100, "thresholds_passed": true } }
+  ```
+  Pulse assigns an `id` when none is supplied and defaults `started_at` to
+  `time.Now()`. Returns `201` with the canonical record.
+- **`GET /pulse/api/test-runs?range=…`** (auth-required) returns runs whose
+  window overlaps the requested range, so the dashboard can render them as
+  vertical bands on the timeline charts.
+- **k6 bridge helper** at
+  [`examples/k6/pulse-k6-bridge.js`](examples/k6/pulse-k6-bridge.js) wrapping
+  the three calls (`pulseAuth`, `pulseStartRun`, `pulseEndRun`). Drop into
+  any k6 script — usage in [`examples/k6/example-test.js`](examples/k6/example-test.js).
+
+### Added — Flame graph from sampled stack traces
+
+- **`pulse.WithProfiling()`** option + **`Config.Profiling`** block. Profile
+  sampling is **off by default** and **double-gated**: both the config flag
+  and the `PULSE_PROFILE_ENABLED` env var must be truthy for sampling to
+  run. Either alone returns `503` with a hint at the missing gate. CPU
+  profiles leak code structure, so a rogue config edit alone cannot enable
+  them in production.
+- **`pulse.profileSampler`** uses `runtime.GoroutineProfile` rather than
+  pulling in `github.com/google/pprof` for protobuf parsing — keeps the
+  binary small and the implementation auditable. Only one sample window
+  runs at a time; concurrent requests get `409 Conflict`.
+- **`pulse.FlameGraphSVG()`** renders the folded sample tree as an
+  interactive SVG flame graph (Brendan Gregg layout, deterministic colour
+  per frame, sortable, tooltips). No Perl, no external tooling.
+- **`pulse.Folded()`** emits the standard `frame;frame;frame count` format
+  so operators can pipe Pulse profiles into existing diff-flame tooling.
+- **`GET /pulse/api/profile/flamegraph`** — returns SVG by default; pass
+  `?format=json` for the tree, `?duration=…&hz=…` to override the sample
+  window, `?cache=true` to reuse the last sample if it's <60s old.
+- **`GET /pulse/api/profile/folded`** — returns the folded-stack text
+  format for pipelining.
+
+### Why GoroutineProfile (not StartCPUProfile + pprof parser)
+
+`runtime.GoroutineProfile` gives us the call stack of every live goroutine
+without needing to parse the pprof protobuf. Pulse treats each frame as one
+sample. The resulting flame graph emphasises hot code paths rather than
+literal CPU time — which, when chasing a regression, is usually what
+operators want. It also keeps the dependency footprint zero: no
+`google/pprof` tree pulled into every consumer's binary.
+
+### Storage interface
+
+`Storage` gains `StoreTestRun(TestRun) error` and `GetTestRuns(TimeRange)
+([]TestRun, error)`. Backwards-compatible at the consumer level since
+`MemoryStorage` is the only implementation.
+
+### Migration notes
+
+Both additions are zero-config. Test-run endpoints start working
+immediately; the flame graph endpoint requires both opt-ins before it
+will sample. See the issue ([#4](https://github.com/MUKE-coder/pulse/issues/4))
+for the operational rationale on the gating.
+
+---
+
 ## [0.4.0] — 2026-05-29
 
 Closes [#2](https://github.com/MUKE-coder/pulse/issues/2) (N+1 detector
@@ -338,11 +413,10 @@ milestones.
 These items were scoped during earlier reviews but deferred to focused
 milestones:
 
-- **v0.5.0** — [#4](https://github.com/MUKE-coder/pulse/issues/4) k6 test-run
-  overlay and pprof flame graph.
 - **v1.0.0** — Persistent SQLite storage backend, embedded dashboard ported to
   Tailwind, public API freeze.
 
+[0.5.0]: https://github.com/MUKE-coder/pulse/releases/tag/v0.5.0
 [0.4.0]: https://github.com/MUKE-coder/pulse/releases/tag/v0.4.0
 [0.3.0]: https://github.com/MUKE-coder/pulse/releases/tag/v0.3.0
 [0.2.0]: https://github.com/MUKE-coder/pulse/releases/tag/v0.2.0

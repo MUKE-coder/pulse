@@ -55,6 +55,9 @@ type Pulse struct {
 	// USE-method sampler (nil if disabled via Config.USE.Enabled)
 	useSampler *useSampler
 
+	// Profile sampler (nil unless Profiling.Enabled and env var are set)
+	profileSampler *profileSampler
+
 	// Lifecycle management
 	ctx    context.Context
 	cancel context.CancelFunc
