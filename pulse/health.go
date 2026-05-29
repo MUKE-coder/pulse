@@ -165,12 +165,10 @@ func (hr *HealthRunner) updateComposite() {
 	copy(checks, hr.pulse.healthChecks)
 	hr.pulse.healthMu.RUnlock()
 
-	if ms, ok := hr.pulse.storage.(*MemoryStorage); ok {
-		state := computeCompositeHealth(hr.pulse, ms)
-		hr.mu.Lock()
-		hr.compositeState = state
-		hr.mu.Unlock()
-	}
+	state := computeCompositeHealth(hr.pulse)
+	hr.mu.Lock()
+	hr.compositeState = state
+	hr.mu.Unlock()
 }
 
 // detectFlapping checks if a health check is alternating between healthy/unhealthy.
@@ -290,13 +288,7 @@ func buildHealthResponse(p *Pulse) HealthResponse {
 		Checks:    make(map[string]HealthCheckResponse),
 	}
 
-	ms, ok := p.storage.(*MemoryStorage)
-	if !ok {
-		resp.Status = "healthy"
-		return resp
-	}
-
-	latestResults := ms.getLatestHealthResults()
+	latestResults := p.storage.GetLatestHealthResults()
 
 	p.healthMu.RLock()
 	checks := make([]HealthCheck, len(p.healthChecks))

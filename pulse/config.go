@@ -9,7 +9,7 @@ import (
 )
 
 // Version is the current Pulse SDK version, bumped on each release.
-const Version = "0.5.0"
+const Version = "1.0.0"
 
 // DefaultUsername is the placeholder dashboard username shipped in defaults.
 // In production (DevMode=false) Pulse refuses to start while this value is in
@@ -21,14 +21,20 @@ const DefaultUsername = "admin"
 const DefaultPassword = "pulse"
 
 // StorageDriver selects the storage backend.
-//
-// Only [Memory] is implemented as of v0.1.0. A SQLite-backed persistent driver
-// is planned for v1.0.0 — see CHANGELOG.md.
 type StorageDriver int
 
 const (
-	// Memory is the default in-memory storage backend using ring buffers.
+	// Memory is the in-memory storage backend using ring buffers. Fast,
+	// allocation-free hot path, but data is lost on restart.
 	Memory StorageDriver = iota
+
+	// SQLite is the persistent storage backend, backed by
+	// github.com/glebarez/sqlite (pure-Go, no CGo). Trades a small write
+	// overhead for survival across restarts. Uses WAL journal mode.
+	//
+	// See StorageConfig.DSN for the database path. The schema is created
+	// automatically on first open.
+	SQLite
 )
 
 // Config holds all configuration for Pulse.
@@ -145,10 +151,14 @@ type DashboardConfig struct {
 // StorageConfig configures the storage backend.
 type StorageConfig struct {
 	// Driver selects the storage backend (default: Memory).
-	// As of v0.1.0 only Memory is implemented.
 	Driver StorageDriver
+	// DSN is the SQLite database file path (default: "pulse.db"). Only used
+	// when Driver is SQLite. Pass ":memory:" for an ephemeral SQLite
+	// database — useful in tests.
+	DSN string
 	// RetentionHours sets data retention period (default: 24).
-	// A background sweeper drops error/alert/N+1 records older than this.
+	// A background sweeper drops records older than this from both
+	// backends.
 	RetentionHours int
 }
 
@@ -311,6 +321,7 @@ func DefaultConfig() Config {
 		},
 		Storage: StorageConfig{
 			Driver:         Memory,
+			DSN:            "pulse.db",
 			RetentionHours: 24,
 		},
 		Tracing: TracingConfig{
@@ -388,6 +399,9 @@ func applyDefaults(cfg Config) Config {
 	// we only touch the filesystem / RNG when a key is actually required.
 
 	// Storage
+	if cfg.Storage.DSN == "" {
+		cfg.Storage.DSN = defaults.Storage.DSN
+	}
 	if cfg.Storage.RetentionHours == 0 {
 		cfg.Storage.RetentionHours = defaults.Storage.RetentionHours
 	}

@@ -9,6 +9,10 @@ import ErrorsPage from './pages/Errors'
 import RuntimePage from './pages/Runtime'
 import HealthPage from './pages/Health'
 import AlertsPage from './pages/Alerts'
+import SLOsPage from './pages/SLOs'
+import USEPage from './pages/USE'
+import TestRunsPage from './pages/TestRuns'
+import FlameGraphPage from './pages/FlameGraph'
 import SettingsPage from './pages/Settings'
 
 function ProtectedRoute({ children }) {
@@ -29,6 +33,10 @@ export default function App() {
         <Route path="runtime" element={<RuntimePage />} />
         <Route path="health" element={<HealthPage />} />
         <Route path="alerts" element={<AlertsPage />} />
+        <Route path="slos" element={<SLOsPage />} />
+        <Route path="use" element={<USEPage />} />
+        <Route path="test-runs" element={<TestRunsPage />} />
+        <Route path="flame" element={<FlameGraphPage />} />
         <Route path="settings" element={<SettingsPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/pulse/ui" replace />} />

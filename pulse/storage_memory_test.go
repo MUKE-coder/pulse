@@ -1,4 +1,4 @@
-package pulse
+﻿package pulse
 
 import (
 	"fmt"
@@ -211,7 +211,7 @@ func TestMemoryStorage_ErrorMuteResolve(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rec, err := s.getErrorByID("err-1")
+	rec, err := s.GetErrorByID("err-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +224,7 @@ func TestMemoryStorage_ErrorMuteResolve(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rec, _ = s.getErrorByID("err-1")
+	rec, _ = s.GetErrorByID("err-1")
 	if !rec.Resolved {
 		t.Fatal("expected resolved to be true")
 	}
@@ -445,7 +445,7 @@ func TestMemoryStorage_DeleteError(t *testing.T) {
 
 	s.StoreError(ErrorRecord{ID: "e1", Fingerprint: "fp-1", Count: 1, FirstSeen: now, LastSeen: now})
 
-	err := s.deleteError("e1")
+	err := s.DeleteError("e1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -455,7 +455,7 @@ func TestMemoryStorage_DeleteError(t *testing.T) {
 		t.Fatalf("expected 0 errors after delete, got %d", len(errors))
 	}
 
-	err = s.deleteError("nonexistent")
+	err = s.DeleteError("nonexistent")
 	if err == nil {
 		t.Fatal("expected error for nonexistent delete")
 	}

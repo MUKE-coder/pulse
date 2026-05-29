@@ -74,8 +74,17 @@ func Mount(ctx context.Context, router *gin.Engine, db *gorm.DB, opts ...Option)
 	// they exit when the caller cancels (or when Pulse.Shutdown is called).
 	p := newPulse(ctx, cfg)
 
-	// Initialize storage
-	p.storage = NewMemoryStorage(cfg.AppName)
+	// Initialize storage based on the configured driver.
+	switch cfg.Storage.Driver {
+	case SQLite:
+		store, err := NewSQLiteStorage(cfg.Storage.DSN, cfg.AppName)
+		if err != nil {
+			log.Fatalf("[pulse] failed to open SQLite storage at %q: %v", cfg.Storage.DSN, err)
+		}
+		p.storage = store
+	default:
+		p.storage = NewMemoryStorage(cfg.AppName)
+	}
 
 	// Start retention sweeper (drops error/alert/N+1 records older than
 	// Storage.RetentionHours). Ring buffers self-trim, so this is only

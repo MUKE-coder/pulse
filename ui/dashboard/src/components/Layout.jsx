@@ -9,6 +9,10 @@ const nav = [
   { to: '/pulse/ui/runtime', label: 'Runtime', icon: '◎' },
   { to: '/pulse/ui/health', label: 'Health', icon: '♡' },
   { to: '/pulse/ui/alerts', label: 'Alerts', icon: '⚠' },
+  { to: '/pulse/ui/slos', label: 'SLOs', icon: '◐' },
+  { to: '/pulse/ui/use', label: 'USE', icon: '⊟' },
+  { to: '/pulse/ui/test-runs', label: 'Test Runs', icon: '▶' },
+  { to: '/pulse/ui/flame', label: 'Flame Graph', icon: '🔥' },
   { to: '/pulse/ui/settings', label: 'Settings', icon: '⚙' },
 ]
 

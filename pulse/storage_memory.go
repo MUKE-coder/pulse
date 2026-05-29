@@ -290,15 +290,16 @@ func (s *MemoryStorage) GetN1Detections(timeRange TimeRange) ([]N1Detection, err
 	return result, nil
 }
 
-// StoreN1Detection stores an N+1 detection. (Not part of Storage interface, used internally.)
-func (s *MemoryStorage) StoreN1Detection(d N1Detection) {
+// StoreN1Detection appends an N+1 detection. The slice is capped at 1000
+// records; oldest entries are dropped when the cap is exceeded.
+func (s *MemoryStorage) StoreN1Detection(d N1Detection) error {
 	s.n1Mu.Lock()
 	defer s.n1Mu.Unlock()
 	s.n1Detections = append(s.n1Detections, d)
-	// Cap at 1000 detections
 	if len(s.n1Detections) > 1000 {
 		s.n1Detections = s.n1Detections[len(s.n1Detections)-1000:]
 	}
+	return nil
 }
 
 // GetConnectionPoolStats returns the latest connection pool stats.
@@ -312,11 +313,12 @@ func (s *MemoryStorage) GetConnectionPoolStats() (*PoolStats, error) {
 	return &cp, nil
 }
 
-// UpdatePoolStats updates the connection pool stats. (Not part of Storage interface.)
-func (s *MemoryStorage) UpdatePoolStats(stats PoolStats) {
+// UpdatePoolStats writes the latest connection pool snapshot.
+func (s *MemoryStorage) UpdatePoolStats(stats PoolStats) error {
 	s.poolMu.Lock()
 	defer s.poolMu.Unlock()
 	s.poolStats = &stats
+	return nil
 }
 
 // --- Runtime Metrics ---
@@ -914,8 +916,8 @@ func formatDuration(d time.Duration) string {
 // Ensure MemoryStorage satisfies the Storage interface at compile time.
 var _ Storage = (*MemoryStorage)(nil)
 
-// deleteError removes an error record by ID. Used internally.
-func (s *MemoryStorage) deleteError(id string) error {
+// DeleteError removes an error record by ID.
+func (s *MemoryStorage) DeleteError(id string) error {
 	s.errorsMu.Lock()
 	defer s.errorsMu.Unlock()
 
@@ -928,8 +930,8 @@ func (s *MemoryStorage) deleteError(id string) error {
 	return fmt.Errorf("error record not found: %s", id)
 }
 
-// getErrorByID retrieves a single error record by ID.
-func (s *MemoryStorage) getErrorByID(id string) (*ErrorRecord, error) {
+// GetErrorByID retrieves a single error record by ID.
+func (s *MemoryStorage) GetErrorByID(id string) (*ErrorRecord, error) {
 	s.errorsMu.RLock()
 	defer s.errorsMu.RUnlock()
 
@@ -942,8 +944,8 @@ func (s *MemoryStorage) getErrorByID(id string) (*ErrorRecord, error) {
 	return nil, fmt.Errorf("error record not found: %s", id)
 }
 
-// getLatestHealthResults returns the latest health check result for each check.
-func (s *MemoryStorage) getLatestHealthResults() map[string]HealthCheckResult {
+// GetLatestHealthResults returns the most recent result per registered check.
+func (s *MemoryStorage) GetLatestHealthResults() map[string]HealthCheckResult {
 	s.healthMu.RLock()
 	defer s.healthMu.RUnlock()
 

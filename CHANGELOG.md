@@ -7,6 +7,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.0.0] — 2026-05-29
+
+🎉 **First stable release.** The public API surface defined in this release
+is covered by [STABILITY.md](STABILITY.md) — semantic versioning from here
+on. Three additions; no source-level breaks at the `pulse` package level.
+
+### Added — SQLite persistent storage backend
+
+- **`pulse.SQLite` storage driver** is implemented at last (it was stubbed
+  out in v0.1.0). Pure-Go via `github.com/glebarez/go-sqlite`, no CGo.
+  Enable with `pulse.WithSQLite("pulse.db")` or
+  `Config.Storage{Driver: pulse.SQLite, DSN: "pulse.db"}`. Pass `":memory:"`
+  for an ephemeral SQLite database (useful in tests).
+- WAL journal mode + `busy_timeout=5000ms` so concurrent readers don't trip
+  writers under load. Schema is created automatically on first open.
+- Synchronous writes (no batching in v1.0.0). For maximum write throughput,
+  stay on `MemoryStorage`. SQLite is the right pick when survival across
+  restarts matters more than peak write rate.
+- All 27 `Storage` methods are implemented. Error records dedupe via SQLite
+  UPSERT keyed on fingerprint, mirroring `MemoryStorage` semantics.
+- New `pulse.WithSQLite(path)` and `pulse.WithMemoryStorage()` options.
+- `Config.Storage.DSN` field is restored. Default `"pulse.db"`.
+
+### Added — Dashboard pages for v0.3–v0.5 features
+
+Four new pages in the embedded dashboard, all styled with Tailwind 4
+utilities (the existing pages continue to use inline styles; an incremental
+port is on the v1.1 roadmap):
+
+- **SLOs** (`/pulse/ui/slos`) — per-SLO compliance, budget consumed/remaining,
+  per-window burn-rate table with firing/ok status. Auto-refresh every 5 s.
+  Renders an empty-state with copy-pasteable Go code when no SLOs are
+  configured.
+- **USE** (`/pulse/ui/use`) — the Utilization / Saturation / Errors grid
+  per resource, with `green` / `amber` / `red` / `unknown` colour bands as
+  described in [Brendan Gregg's USE method](https://brendangregg.com/usemethod.html).
+- **Test Runs** (`/pulse/ui/test-runs`) — table view of k6 / load-test runs
+  recorded via `POST /pulse/api/test-runs`. Includes a range selector and
+  inline metadata badges.
+- **Flame Graph** (`/pulse/ui/flame`) — control panel for sampling a profile
+  window (duration + Hz), renders the SVG inline, includes a "Download
+  .folded" button for piping into `flamegraph.pl` / `difffolded.pl`.
+  Surfaces the double-gate hint verbatim when the backend returns 503.
+
+### Added — Public API stability
+
+- **[STABILITY.md](STABILITY.md)** documents the semver guarantees, the
+  deprecation policy ("at least one minor release with a `// Deprecated:`
+  notice before any removal"), the support policy for old major versions,
+  and the public API surface boundary.
+- `pulse.Version` constant now matches the Git tag exactly.
+
+### Changed — Storage interface
+
+Five methods that previously required type-asserting `p.storage` to
+`*MemoryStorage` are promoted to the `Storage` interface, so SQLite can be
+a drop-in replacement:
+
+- `Storage.StoreN1Detection(d N1Detection) error` (was `MemoryStorage.StoreN1Detection`)
+- `Storage.UpdatePoolStats(p PoolStats) error` (was `MemoryStorage.UpdatePoolStats`)
+- `Storage.GetErrorByID(id string) (*ErrorRecord, error)` (was `MemoryStorage.getErrorByID`)
+- `Storage.DeleteError(id string) error` (was `MemoryStorage.deleteError`)
+- `Storage.GetLatestHealthResults() map[string]HealthCheckResult` (was `MemoryStorage.getLatestHealthResults`)
+
+These were unexported or off-interface in earlier releases, so no public
+caller is broken. Internal callers (`api.go`, `health.go`, `aggregator.go`,
+`gorm_plugin.go`) now use the interface and no longer type-assert.
+
+### Tests
+
+New `pulse/storage_sqlite_test.go` covers:
+- Request storage + route-stat aggregation.
+- Error dedup via UPSERT + GetErrorByID / UpdateError / DeleteError round-trip.
+- Test-run upsert with metadata round-trip.
+- Retention cleanup.
+- End-to-end Mount with SQLite, shutdown, re-Mount on the same file — data
+  survives the restart.
+
+### Migration notes
+
+If you were already on `pulse.Memory` (the default), there is nothing to do.
+The only theoretical break is if you were type-asserting `p.storage` to
+`*MemoryStorage` to call the now-promoted private methods — those callsites
+should use the interface directly. No exported function signature changed
+at the `pulse` package level.
+
+---
+
 ## [0.5.0] — 2026-05-29
 
 Closes [#4](https://github.com/MUKE-coder/pulse/issues/4) — k6 test-run
@@ -413,9 +501,11 @@ milestones.
 These items were scoped during earlier reviews but deferred to focused
 milestones:
 
-- **v1.0.0** — Persistent SQLite storage backend, embedded dashboard ported to
-  Tailwind, public API freeze.
+- **v1.1.0** — Incremental Tailwind port of the original 8 dashboard pages.
+  Batched writes for the SQLite backend (move per-call inserts behind a
+  channel + worker pool).
 
+[1.0.0]: https://github.com/MUKE-coder/pulse/releases/tag/v1.0.0
 [0.5.0]: https://github.com/MUKE-coder/pulse/releases/tag/v0.5.0
 [0.4.0]: https://github.com/MUKE-coder/pulse/releases/tag/v0.4.0
 [0.3.0]: https://github.com/MUKE-coder/pulse/releases/tag/v0.3.0

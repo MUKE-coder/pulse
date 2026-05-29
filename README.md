@@ -236,16 +236,31 @@ curl http://localhost:8080/pulse/api/overview \
 
 ### Storage
 
+Pulse ships with two storage backends. Pick one when you mount:
+
+```go
+// In-memory (default, fastest):
+pulse.Mount(ctx, router, db /*, no Storage option needed */)
+
+// SQLite (persistent across restarts):
+pulse.Mount(ctx, router, db, pulse.WithSQLite("pulse.db"))
+```
+
+Or set them on the Config struct directly:
+
 ```go
 Storage: pulse.StorageConfig{
-    Driver:         pulse.Memory,   // only Memory is implemented in v0.1.0
-    RetentionHours: 24,             // Data retention in hours (default: 24)
+    Driver:         pulse.SQLite,
+    DSN:            "pulse.db",      // or ":memory:" for an ephemeral SQLite DB
+    RetentionHours: 24,
 },
 ```
 
-The in-memory storage uses lock-free ring buffers with ~100K request capacity. A background **retention sweeper** runs every minute (every 10 s in `DevMode`) to drop error fingerprints, alerts, and N+1 detections older than `RetentionHours`. Ring buffers self-trim by overwriting their oldest entries.
+**Memory backend** — lock-free ring buffers, ~100K request capacity. Fast, allocation-free hot path. Data is lost on restart.
 
-> **Persistence on the roadmap.** A SQLite-backed persistent storage driver is planned for `v1.0.0` (see [CHANGELOG.md](CHANGELOG.md#roadmap)). It is not available in `v0.1.0` — the previous `pulse.SQLite` enum value has been removed to avoid silently falling back to `Memory`.
+**SQLite backend** — pure Go (no CGo), WAL journal mode, `busy_timeout=5000ms`. The schema is created automatically on first open. Writes are synchronous in v1.0.0 — high-throughput workloads should stay on Memory until batched writes ship in v1.1. Comes from `github.com/glebarez/go-sqlite`, already a transitive dependency, so no new module is pulled in for Memory-only consumers.
+
+A background **retention sweeper** runs every minute (every 10 s in `DevMode`) against both backends, dropping records older than `RetentionHours`. Ring buffers also self-trim by overwriting their oldest entries.
 
 ### Request Tracing
 
@@ -1116,11 +1131,13 @@ This stops all background goroutines (runtime sampler, aggregator, health runner
 
 ## Versioning & Roadmap
 
-Pulse follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The current version is exposed as `pulse.Version`. See [CHANGELOG.md](CHANGELOG.md) for the full release history; the short version of what is coming next:
+Pulse follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The current version is exposed as `pulse.Version`. Starting at **v1.0.0**, the public API surface defined in [STABILITY.md](STABILITY.md) is covered by semver guarantees — no breaking changes outside major releases, all removals preceded by at least one minor cycle of `// Deprecated:` notice.
+
+See [CHANGELOG.md](CHANGELOG.md) for the full release history; the short version of what is coming next:
 
 | Version | Theme |
 |---------|-------|
-| `v1.0.0` | Persistent SQLite storage backend, dashboard ported to Tailwind, public API freeze |
+| `v1.1.0` | Incremental Tailwind port of the original 8 dashboard pages; batched writes for the SQLite backend |
 
 ## License
 

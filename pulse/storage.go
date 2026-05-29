@@ -14,7 +14,9 @@ type Storage interface {
 	StoreQuery(m QueryMetric) error
 	GetSlowQueries(threshold time.Duration, limit int) ([]QueryMetric, error)
 	GetQueryPatterns(timeRange TimeRange) ([]QueryPattern, error)
+	StoreN1Detection(d N1Detection) error
 	GetN1Detections(timeRange TimeRange) ([]N1Detection, error)
+	UpdatePoolStats(p PoolStats) error
 	GetConnectionPoolStats() (*PoolStats, error)
 
 	// Runtime metrics
@@ -25,11 +27,14 @@ type Storage interface {
 	StoreError(e ErrorRecord) error
 	GetErrors(filter ErrorFilter) ([]ErrorRecord, error)
 	GetErrorGroups(timeRange TimeRange) ([]ErrorGroup, error)
+	GetErrorByID(id string) (*ErrorRecord, error)
 	UpdateError(id string, updates map[string]interface{}) error
+	DeleteError(id string) error
 
 	// Health
 	StoreHealthResult(r HealthCheckResult) error
 	GetHealthHistory(name string, limit int) ([]HealthCheckResult, error)
+	GetLatestHealthResults() map[string]HealthCheckResult
 
 	// Alerts
 	StoreAlert(a AlertRecord) error

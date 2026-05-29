@@ -1,4 +1,4 @@
-package pulse
+﻿package pulse
 
 import (
 	"context"
@@ -427,8 +427,8 @@ func TestComputeCompositeHealth(t *testing.T) {
 	p := setupAggregatorPulse(t)
 	ms := p.storage.(*MemoryStorage)
 
-	// No checks â†’ healthy
-	status := computeCompositeHealth(p, ms)
+	// No checks Ã¢â€ â€™ healthy
+	status := computeCompositeHealth(p)
 	if status != "healthy" {
 		t.Errorf("expected 'healthy' with no checks, got %q", status)
 	}
@@ -437,14 +437,14 @@ func TestComputeCompositeHealth(t *testing.T) {
 	p.AddHealthCheck(HealthCheck{Name: "db", Type: "database", Critical: true})
 	ms.StoreHealthResult(HealthCheckResult{Name: "db", Status: "healthy", Timestamp: time.Now()})
 
-	status = computeCompositeHealth(p, ms)
+	status = computeCompositeHealth(p)
 	if status != "healthy" {
 		t.Errorf("expected 'healthy' with passing critical check, got %q", status)
 	}
 
 	// Fail the critical check
 	ms.StoreHealthResult(HealthCheckResult{Name: "db", Status: "unhealthy", Timestamp: time.Now()})
-	status = computeCompositeHealth(p, ms)
+	status = computeCompositeHealth(p)
 	if status != "unhealthy" {
 		t.Errorf("expected 'unhealthy' with failing critical check, got %q", status)
 	}
@@ -454,7 +454,7 @@ func TestComputeCompositeHealth(t *testing.T) {
 	p.AddHealthCheck(HealthCheck{Name: "cache", Type: "redis", Critical: false})
 	ms.StoreHealthResult(HealthCheckResult{Name: "cache", Status: "unhealthy", Timestamp: time.Now()})
 
-	status = computeCompositeHealth(p, ms)
+	status = computeCompositeHealth(p)
 	if status != "degraded" {
 		t.Errorf("expected 'degraded' with failing non-critical check, got %q", status)
 	}

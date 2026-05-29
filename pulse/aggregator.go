@@ -370,16 +370,14 @@ func (agg *Aggregator) computeOverview(tr TimeRange, routeStats []RouteStats, th
 	overview.ErrorSeries = errorTS
 
 	// Compute health status from stored health results
-	if ms, ok := agg.pulse.storage.(*MemoryStorage); ok {
-		overview.HealthStatus = computeCompositeHealth(agg.pulse, ms)
-	}
+	overview.HealthStatus = computeCompositeHealth(agg.pulse)
 
 	return overview
 }
 
 // computeCompositeHealth determines the overall health status.
-func computeCompositeHealth(p *Pulse, ms *MemoryStorage) string {
-	latestResults := ms.getLatestHealthResults()
+func computeCompositeHealth(p *Pulse) string {
+	latestResults := p.storage.GetLatestHealthResults()
 	if len(latestResults) == 0 {
 		return "healthy" // no checks registered → healthy by default
 	}

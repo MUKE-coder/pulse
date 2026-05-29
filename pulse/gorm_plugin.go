@@ -216,9 +216,8 @@ func (p *PulsePlugin) trackN1(traceID, normalizedSQL string, duration time.Durat
 			DetectedAt:     time.Now(),
 		}
 
-		// Store via MemoryStorage's N+1 specific method
-		if ms, ok := p.pulse.storage.(*MemoryStorage); ok {
-			ms.StoreN1Detection(detection)
+		if err := p.pulse.storage.StoreN1Detection(detection); err != nil && p.pulse.config.DevMode {
+			p.pulse.logger.Printf("[pulse] failed to store N+1 detection: %v", err)
 		}
 
 		if p.pulse.config.DevMode {
@@ -275,8 +274,8 @@ func (p *PulsePlugin) startPoolMonitoring(db *gorm.DB) {
 					MaxLifetimeClosed:  stats.MaxLifetimeClosed,
 				}
 
-				if ms, ok := p.pulse.storage.(*MemoryStorage); ok {
-					ms.UpdatePoolStats(poolStats)
+				if err := p.pulse.storage.UpdatePoolStats(poolStats); err != nil && p.pulse.config.DevMode {
+					p.pulse.logger.Printf("[pulse] failed to update pool stats: %v", err)
 				}
 			}
 		}

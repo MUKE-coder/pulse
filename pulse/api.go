@@ -468,12 +468,7 @@ func errorsListHandler(p *Pulse) gin.HandlerFunc {
 func errorDetailHandler(p *Pulse) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
-		ms, ok := p.storage.(*MemoryStorage)
-		if !ok {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "unsupported storage backend"})
-			return
-		}
-		record, err := ms.getErrorByID(id)
+		record, err := p.storage.GetErrorByID(id)
 		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "error not found"})
 			return
@@ -507,12 +502,7 @@ func errorResolveHandler(p *Pulse) gin.HandlerFunc {
 func errorDeleteHandler(p *Pulse) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
-		ms, ok := p.storage.(*MemoryStorage)
-		if !ok {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "unsupported storage backend"})
-			return
-		}
-		if err := ms.deleteError(id); err != nil {
+		if err := p.storage.DeleteError(id); err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 			return
 		}

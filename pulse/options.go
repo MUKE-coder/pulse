@@ -79,6 +79,22 @@ func WithRetention(hours int) Option {
 	return func(c *Config) { c.Storage.RetentionHours = hours }
 }
 
+// WithMemoryStorage selects the in-memory ring-buffer backend (this is the
+// default; included for parity with WithSQLite).
+func WithMemoryStorage() Option {
+	return func(c *Config) { c.Storage.Driver = Memory }
+}
+
+// WithSQLite selects the persistent SQLite backend at the given file path.
+// Pass ":memory:" for an ephemeral SQLite database (handy in tests). The
+// schema is created automatically on first open.
+func WithSQLite(path string) Option {
+	return func(c *Config) {
+		c.Storage.Driver = SQLite
+		c.Storage.DSN = path
+	}
+}
+
 // --- Tracing ---
 
 // WithTracingDisabled turns off the request-tracing middleware entirely.
