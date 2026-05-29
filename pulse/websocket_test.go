@@ -1,6 +1,7 @@
 package pulse
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -32,7 +33,7 @@ func setupWSPulse(t *testing.T) (*Pulse, *gin.Engine) {
 			Enabled: boolPtr(false),
 		},
 	})
-	p := newPulse(cfg)
+	p := newPulse(context.Background(), cfg)
 	p.storage = NewMemoryStorage("test")
 
 	// Start WebSocket hub
@@ -358,7 +359,7 @@ func TestWebSocketHub_ChannelSubscription(t *testing.T) {
 		Count:        1,
 	})
 
-	// Read with a deadline — should get the error, not the request
+	// Read with a deadline â€” should get the error, not the request
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	_, message, err := conn.ReadMessage()
 	if err != nil {
@@ -442,9 +443,9 @@ func TestWebSocketHub_ConcurrentBroadcast(t *testing.T) {
 }
 
 func TestWebSocketHub_NilHubSafe(t *testing.T) {
-	p := newPulse(applyDefaults(Config{}))
+	p := newPulse(context.Background(), applyDefaults(Config{}))
 	p.storage = NewMemoryStorage("test")
-	// wsHub is nil — broadcast calls should not panic
+	// wsHub is nil â€” broadcast calls should not panic
 
 	p.BroadcastRequest(RequestMetric{Method: "GET", Path: "/safe"})
 	p.BroadcastError(ErrorRecord{ErrorMessage: "safe"})
@@ -517,7 +518,7 @@ func TestWebSocketHub_MultiSubscription(t *testing.T) {
 	conn.WriteMessage(websocket.TextMessage, subData)
 	time.Sleep(100 * time.Millisecond)
 
-	// Send health — should be received
+	// Send health â€” should be received
 	p.BroadcastHealthResult(HealthCheckResult{
 		Name:   "db",
 		Status: "healthy",
@@ -535,7 +536,7 @@ func TestWebSocketHub_MultiSubscription(t *testing.T) {
 		t.Errorf("expected health type, got %q", msg.Type)
 	}
 
-	// Send overview — should also be received
+	// Send overview â€” should also be received
 	p.BroadcastOverview(&Overview{AppName: "Multi"})
 
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second))

@@ -1,6 +1,7 @@
 package pulse
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -24,7 +25,7 @@ func setupErrorTestPulse() *Pulse {
 			MaxBodySize:        4096,
 		},
 	})
-	p := newPulse(cfg)
+	p := newPulse(context.Background(), cfg)
 	p.storage = NewMemoryStorage("test")
 	return p
 }
@@ -450,7 +451,7 @@ func TestErrorMiddleware_DisabledDoesNothing(t *testing.T) {
 			Enabled: boolPtr(false),
 		},
 	})
-	p := newPulse(cfg)
+	p := newPulse(context.Background(), cfg)
 	p.storage = NewMemoryStorage("test")
 	defer p.Shutdown()
 

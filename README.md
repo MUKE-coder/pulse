@@ -112,6 +112,7 @@ go get github.com/MUKE-coder/pulse
 package main
 
 import (
+    "context"
     "log"
 
     "github.com/MUKE-coder/pulse/pulse"
@@ -129,11 +130,13 @@ func main() {
 
     router := gin.Default()
 
-    // One line to mount Pulse
-    pulse.Mount(router, db, pulse.Config{
-        AppName: "My API",
-        DevMode: true,
-    })
+    // One line to mount Pulse. Pulse's background goroutines are tied to ctx —
+    // cancel it (e.g. on SIGINT) and Pulse shuts down cleanly.
+    ctx := context.Background()
+    pulse.Mount(ctx, router, db,
+        pulse.WithAppName("My API"),
+        pulse.WithDevMode(),
+    )
 
     // Your application routes
     router.GET("/api/users", func(c *gin.Context) {
@@ -144,7 +147,7 @@ func main() {
     // API:        http://localhost:8080/pulse/api/
     // Health:     http://localhost:8080/pulse/health
     // WebSocket:  ws://localhost:8080/pulse/ws/live?token=<jwt>  (auth required)
-    // Login:      admin / pulse (default credentials)
+    // Login:      admin / pulse (default credentials — DevMode only)
     log.Fatal(router.Run(":8080"))
 }
 ```
@@ -155,30 +158,34 @@ After starting, Pulse automatically begins tracking every HTTP request, database
 
 ## Configuration
 
-All configuration is optional. Pulse ships with sensible defaults — just pass `pulse.Config{}` and everything works.
+All configuration is optional. Pulse ships with sensible defaults — call `pulse.Mount(ctx, router, db)` with no options and everything works.
+
+Configuration is supplied via **functional options**. The most common knobs have dedicated `With*` helpers; for everything else, build a [`pulse.Config`](pulse/config.go) and pass it via `pulse.WithConfig(...)`.
 
 ```go
-pulse.Mount(router, db, pulse.Config{
-    // URL prefix for all Pulse endpoints (default: "/pulse")
+// Granular form — preferred for one-off knobs.
+pulse.Mount(ctx, router, db,
+    pulse.WithAppName("My API"),
+    pulse.WithDevMode(),
+    pulse.WithCredentials("admin", os.Getenv("PULSE_PASSWORD")),
+    pulse.WithSecretKeyFile("/var/lib/pulse/secret.key"),
+    pulse.WithSlackAlerts(os.Getenv("SLACK_WEBHOOK_URL")),
+    pulse.WithPrometheus(),
+    pulse.WithSlowRequestThreshold(500 * time.Millisecond),
+)
+
+// Config-struct form — preferred when loading from YAML/env.
+pulse.Mount(ctx, router, db, pulse.WithConfig(pulse.Config{
     Prefix:  "/pulse",
-
-    // Application name shown in dashboard (default: "Pulse")
     AppName: "My API",
-
-    // Enable verbose logging and faster aggregation cycles (default: false)
     DevMode: true,
-
-    Dashboard: pulse.DashboardConfig{ ... },
-    Storage:   pulse.StorageConfig{ ... },
-    Tracing:   pulse.TracingConfig{ ... },
-    Database:  pulse.DatabaseConfig{ ... },
-    Runtime:   pulse.RuntimeConfig{ ... },
-    Errors:    pulse.ErrorConfig{ ... },
-    Health:    pulse.HealthConfig{ ... },
-    Alerts:    pulse.AlertConfig{ ... },
-    Prometheus: pulse.PrometheusConfig{ ... },
-})
+    Dashboard: pulse.DashboardConfig{ /* ... */ },
+    Tracing:   pulse.TracingConfig{ /* ... */ },
+    // ...
+}))
 ```
+
+> **Upgrading from v0.1.0?** See the [migration notes in CHANGELOG.md](CHANGELOG.md#migrating-from-v010). The change is mechanical: prepend `ctx`, wrap your `Config{}` in `pulse.WithConfig(...)`.
 
 ### Dashboard Authentication
 
@@ -251,7 +258,9 @@ Tracing: pulse.TracingConfig{
 },
 ```
 
-Errors and slow requests are **always** captured regardless of sample rate. Every request gets a unique trace ID propagated via the `X-Pulse-Trace-ID` header.
+Errors and slow requests are **always** captured regardless of sample rate. Every request gets a trace ID propagated via both the legacy `X-Pulse-Trace-ID` header and the W3C [`traceparent`](https://www.w3.org/TR/trace-context/) header.
+
+If an inbound request already carries a valid `traceparent`, Pulse adopts the upstream `trace-id` instead of generating a new one — so traces continue cleanly across service boundaries when upstream services are instrumented with OpenTelemetry. Outbound calls sent through `pulse.WrapHTTPClient` get a `traceparent` header injected automatically.
 
 ### Database Monitoring
 
@@ -947,7 +956,6 @@ Pulse follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The cu
 
 | Version | Theme |
 |---------|-------|
-| `v0.2.0` | Functional-options API, `context.Context` on the public surface, W3C `traceparent` propagation |
 | `v0.3.0` | SLO objects + burn-rate alerts ([#1](https://github.com/MUKE-coder/pulse/issues/1)) |
 | `v0.4.0` | N+1 detector enhancements ([#2](https://github.com/MUKE-coder/pulse/issues/2)) + USE method dashboard ([#3](https://github.com/MUKE-coder/pulse/issues/3)) |
 | `v0.5.0` | k6 test-run overlay + pprof flame graph ([#4](https://github.com/MUKE-coder/pulse/issues/4)) |

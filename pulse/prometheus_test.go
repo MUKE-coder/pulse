@@ -1,6 +1,7 @@
 package pulse
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -20,7 +21,7 @@ func setupPromPulse(t *testing.T) *Pulse {
 		Errors:     ErrorConfig{Enabled: boolPtr(false)},
 		Alerts:     AlertConfig{Enabled: boolPtr(false)},
 	})
-	p := newPulse(cfg)
+	p := newPulse(context.Background(), cfg)
 	p.storage = NewMemoryStorage("test")
 	t.Cleanup(func() { p.Shutdown() })
 	return p

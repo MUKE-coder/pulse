@@ -1,6 +1,7 @@
 package pulse
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -30,7 +31,7 @@ func setupAlertPulse(t *testing.T) *Pulse {
 			Cooldown: 1 * time.Second, // short cooldown for tests
 		},
 	})
-	p := newPulse(cfg)
+	p := newPulse(context.Background(), cfg)
 	p.storage = NewMemoryStorage("test")
 	p.aggregator = newAggregator(p)
 	t.Cleanup(func() { p.Shutdown() })
@@ -94,7 +95,7 @@ func TestAlertEngine_UserRulesOverrideDefaults(t *testing.T) {
 		Errors:  ErrorConfig{Enabled: boolPtr(false)},
 	})
 
-	p := newPulse(cfg)
+	p := newPulse(context.Background(), cfg)
 	p.storage = NewMemoryStorage("test")
 	p.aggregator = newAggregator(p)
 	t.Cleanup(func() { p.Shutdown() })
@@ -214,7 +215,7 @@ func TestAlertEngine_Lifecycle_OKToPendingToFiring(t *testing.T) {
 	// Force aggregation
 	p.aggregator.run()
 
-	// First evaluate: OK → Pending
+	// First evaluate: OK â†’ Pending
 	ae.evaluate()
 
 	rs := ae.ruleStates["test_rule"]
@@ -222,7 +223,7 @@ func TestAlertEngine_Lifecycle_OKToPendingToFiring(t *testing.T) {
 		t.Errorf("expected state Pending after first eval, got %s", rs.state)
 	}
 
-	// Second evaluate: Pending → Firing (Duration=0, so condition immediately met)
+	// Second evaluate: Pending â†’ Firing (Duration=0, so condition immediately met)
 	ae.evaluate()
 
 	if rs.state != AlertStateFiring {
@@ -257,7 +258,7 @@ func TestAlertEngine_Lifecycle_FiringToResolved(t *testing.T) {
 			Name:      "test_resolve",
 			Metric:    "error_rate",
 			Operator:  ">",
-			Threshold: 50, // 50% — well above actual
+			Threshold: 50, // 50% â€” well above actual
 			Duration:  0,
 			Severity:  "warning",
 		},
@@ -335,7 +336,7 @@ func TestAlertEngine_Cooldown(t *testing.T) {
 	}
 	p.aggregator.run()
 
-	// Evaluate — should fire but cooldown prevents storing a new alert
+	// Evaluate â€” should fire but cooldown prevents storing a new alert
 	initialAlerts, _ := p.storage.GetAlerts(AlertFilter{Limit: 100})
 	initialCount := len(initialAlerts)
 
@@ -477,20 +478,20 @@ func TestSlackNotificationFormat(t *testing.T) {
 		Tracing: TracingConfig{Enabled: boolPtr(false)},
 		Errors:  ErrorConfig{Enabled: boolPtr(false)},
 	})
-	p := newPulse(cfg)
+	p := newPulse(context.Background(), cfg)
 	p.storage = NewMemoryStorage("test")
 	t.Cleanup(func() { p.Shutdown() })
 
 	ae := &AlertEngine{pulse: p, ruleStates: make(map[string]*ruleState)}
 
 	alert := AlertRecord{
-		ID:        "test-alert",
-		RuleName:  "high_latency",
-		Metric:    "p95_latency",
-		Severity:  "critical",
-		State:     AlertStateFiring,
-		Message:   "test message",
-		FiredAt:   time.Now(),
+		ID:       "test-alert",
+		RuleName: "high_latency",
+		Metric:   "p95_latency",
+		Severity: "critical",
+		State:    AlertStateFiring,
+		Message:  "test message",
+		FiredAt:  time.Now(),
 	}
 
 	ae.sendSlack(cfg.Alerts.Slack, alert)
@@ -540,7 +541,7 @@ func TestWebhookNotificationWithSignature(t *testing.T) {
 	}))
 	defer server.Close()
 
-	p := newPulse(applyDefaults(Config{
+	p := newPulse(context.Background(), applyDefaults(Config{
 		Health:  HealthConfig{Enabled: boolPtr(false)},
 		Runtime: RuntimeConfig{Enabled: boolPtr(false)},
 		Tracing: TracingConfig{Enabled: boolPtr(false)},
@@ -612,7 +613,7 @@ func TestDiscordNotificationFormat(t *testing.T) {
 	}))
 	defer server.Close()
 
-	p := newPulse(applyDefaults(Config{
+	p := newPulse(context.Background(), applyDefaults(Config{
 		Health:  HealthConfig{Enabled: boolPtr(false)},
 		Runtime: RuntimeConfig{Enabled: boolPtr(false)},
 		Tracing: TracingConfig{Enabled: boolPtr(false)},
@@ -761,7 +762,7 @@ func TestAlertEngine_WebhookRetry(t *testing.T) {
 	}))
 	defer server.Close()
 
-	p := newPulse(applyDefaults(Config{
+	p := newPulse(context.Background(), applyDefaults(Config{
 		Health:  HealthConfig{Enabled: boolPtr(false)},
 		Runtime: RuntimeConfig{Enabled: boolPtr(false)},
 		Tracing: TracingConfig{Enabled: boolPtr(false)},

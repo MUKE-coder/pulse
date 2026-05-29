@@ -1,4 +1,4 @@
-package pulse
+﻿package pulse
 
 import (
 	"context"
@@ -36,7 +36,7 @@ func setupTestPulseWithDB(t *testing.T) (*gorm.DB, *Pulse) {
 	db := setupTestDB(t)
 
 	cfg := applyDefaults(Config{DevMode: true})
-	p := newPulse(cfg)
+	p := newPulse(context.Background(), cfg)
 	p.storage = NewMemoryStorage("test")
 
 	plugin := &PulsePlugin{
@@ -264,7 +264,7 @@ func TestGormPlugin_NormalizesSQL(t *testing.T) {
 }
 
 func TestGormPlugin_CleanupTraceN1(t *testing.T) {
-	p := newPulse(applyDefaults(Config{}))
+	p := newPulse(context.Background(), applyDefaults(Config{}))
 	p.storage = NewMemoryStorage("test")
 	defer p.Shutdown()
 
@@ -296,7 +296,7 @@ func BenchmarkGormPlugin_Callback(b *testing.B) {
 	}
 	db.AutoMigrate(&TestUser{})
 
-	p := newPulse(applyDefaults(Config{}))
+	p := newPulse(context.Background(), applyDefaults(Config{}))
 	p.storage = NewMemoryStorage("bench")
 	defer p.Shutdown()
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 
 	"github.com/MUKE-coder/pulse/pulse"
@@ -31,10 +32,10 @@ func main() {
 	router := gin.Default()
 
 	// Mount Pulse — that's it!
-	pulse.Mount(router, db, pulse.Config{
-		AppName: "Basic Example",
-		DevMode: true,
-	})
+	pulse.Mount(context.Background(), router, db,
+		pulse.WithAppName("Basic Example"),
+		pulse.WithDevMode(),
+	)
 
 	// Application routes
 	router.GET("/api/users", func(c *gin.Context) {

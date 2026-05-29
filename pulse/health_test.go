@@ -1,4 +1,4 @@
-package pulse
+﻿package pulse
 
 import (
 	"context"
@@ -20,7 +20,7 @@ func setupHealthPulse(t *testing.T) *Pulse {
 			Timeout:       5 * time.Second,
 		},
 	})
-	p := newPulse(cfg)
+	p := newPulse(context.Background(), cfg)
 	p.storage = NewMemoryStorage("test")
 	t.Cleanup(func() { p.Shutdown() })
 	return p
@@ -212,7 +212,7 @@ func TestHealthRunner_Timeout(t *testing.T) {
 			Timeout: 100 * time.Millisecond,
 		},
 	})
-	p := newPulse(cfg)
+	p := newPulse(context.Background(), cfg)
 	p.storage = NewMemoryStorage("test")
 	t.Cleanup(func() { p.Shutdown() })
 

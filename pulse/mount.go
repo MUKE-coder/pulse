@@ -14,19 +14,34 @@ import (
 	"gorm.io/gorm"
 )
 
-// Mount registers Pulse middleware, GORM plugin, and dashboard routes on the given
-// Gin router and GORM database. It returns a *Pulse instance for further configuration
-// (e.g., adding health checks, wrapping HTTP clients).
+// Mount registers Pulse middleware, the GORM plugin, and the dashboard
+// routes on the given Gin router and GORM database, returning a *Pulse the
+// caller can use for further configuration (adding health checks, wrapping
+// HTTP clients).
+//
+// The supplied ctx ties Pulse's background goroutines (runtime sampler,
+// retention sweeper, alert engine, health runner, websocket hub) to the
+// caller's lifecycle: cancel ctx and they all drain. Calling [Pulse.Shutdown]
+// remains valid but is now optional.
+//
+// Configuration is supplied via functional options. The most common knobs
+// are exposed as With* helpers; for everything else, build a full [Config]
+// and pass it via [WithConfig].
 //
 // Usage:
 //
-//	p := pulse.Mount(router, db, pulse.Config{})
+//	p := pulse.Mount(ctx, router, db,
+//	    pulse.WithAppName("Blog API"),
+//	    pulse.WithDevMode(),
+//	)
 //	// Dashboard available at http://localhost:8080/pulse
-func Mount(router *gin.Engine, db *gorm.DB, configs ...Config) *Pulse {
-	// Merge user config with defaults
-	var cfg Config
-	if len(configs) > 0 {
-		cfg = configs[0]
+func Mount(ctx context.Context, router *gin.Engine, db *gorm.DB, opts ...Option) *Pulse {
+	// Start from defaults, then layer user options.
+	cfg := DefaultConfig()
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
 	}
 	cfg = applyDefaults(cfg)
 
@@ -55,8 +70,9 @@ func Mount(router *gin.Engine, db *gorm.DB, configs ...Config) *Pulse {
 			"Set Dashboard.SecretKeyFile to persist the key.")
 	}
 
-	// Create the Pulse engine
-	p := newPulse(cfg)
+	// Create the Pulse engine — its background goroutines inherit ctx, so
+	// they exit when the caller cancels (or when Pulse.Shutdown is called).
+	p := newPulse(ctx, cfg)
 
 	// Initialize storage
 	p.storage = NewMemoryStorage(cfg.AppName)

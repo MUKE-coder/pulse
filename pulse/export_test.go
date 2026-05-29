@@ -2,6 +2,7 @@ package pulse
 
 import (
 	"bytes"
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"net/http"
@@ -24,7 +25,7 @@ func setupExportPulse(t *testing.T) (*Pulse, *gin.Engine) {
 		Errors:  ErrorConfig{Enabled: boolPtr(false)},
 		Alerts:  AlertConfig{Enabled: boolPtr(false)},
 	})
-	p := newPulse(cfg)
+	p := newPulse(context.Background(), cfg)
 	p.storage = NewMemoryStorage("test")
 	t.Cleanup(func() { p.Shutdown() })
 
@@ -255,7 +256,7 @@ func TestExport_DefaultsApplied(t *testing.T) {
 		Latency: 5 * time.Millisecond, Timestamp: time.Now(),
 	})
 
-	// Send with empty format and range — should use defaults
+	// Send with empty format and range â€” should use defaults
 	body := `{"type": "requests"}`
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/pulse/api/data/export", strings.NewReader(body))

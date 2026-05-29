@@ -53,6 +53,21 @@ func newInstrumentedTransport(p *Pulse, rt http.RoundTripper, name string) *inst
 func (t *instrumentedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	start := time.Now()
 
+	// Propagate the W3C traceparent so dependencies can correlate with this
+	// trace. We only set the header if the request doesn't already carry one
+	// (callers may explicitly want to start a new trace) and we have a
+	// trace ID in the request's context.
+	if req.Header.Get(TraceparentHeader) == "" {
+		if traceID := TraceIDFromContext(req.Context()); traceID != "" {
+			// Clone the request so we don't mutate caller-owned headers.
+			// http.Request.Header is a map; mutating it from RoundTrip is
+			// undefined per the docs.
+			cloned := req.Clone(req.Context())
+			cloned.Header.Set(TraceparentHeader, BuildTraceparent(traceID, GenerateSpanID()))
+			req = cloned
+		}
+	}
+
 	resp, err := t.wrapped.RoundTrip(req)
 
 	latency := time.Since(start)

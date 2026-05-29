@@ -1,6 +1,7 @@
 package pulse
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -21,7 +22,7 @@ func setupAPIPulse(t *testing.T) (*Pulse, *gin.Engine) {
 			SecretKey: "test-secret-key-for-jwt",
 		},
 	})
-	p := newPulse(cfg)
+	p := newPulse(context.Background(), cfg)
 	p.storage = NewMemoryStorage("test")
 	p.aggregator = &Aggregator{pulse: p}
 	t.Cleanup(func() { p.Shutdown() })
@@ -326,7 +327,7 @@ func TestAPI_DatabasePatterns(t *testing.T) {
 
 	p.storage.StoreQuery(QueryMetric{
 		NormalizedSQL: "select * from users where id = ?",
-		Operation: "SELECT", Table: "users", Duration: 10 * time.Millisecond,
+		Operation:     "SELECT", Table: "users", Duration: 10 * time.Millisecond,
 		Timestamp: time.Now(),
 	})
 

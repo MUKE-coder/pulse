@@ -85,9 +85,18 @@ func newTracingMiddleware(p *Pulse) gin.HandlerFunc {
 			return
 		}
 
-		// Generate trace ID
-		traceID := GenerateTraceID()
+		// Honor an incoming W3C traceparent if present and valid; otherwise
+		// generate a fresh trace ID. Either way we emit a traceparent on the
+		// response so downstream services can continue the trace.
+		var traceID, parentSpanID string
+		if tp, _, ok := ParseTraceparent(c.GetHeader(TraceparentHeader)); ok {
+			traceID = tp
+		} else {
+			traceID = GenerateTraceID()
+		}
+		parentSpanID = GenerateSpanID()
 		c.Header(TraceIDHeader, traceID)
+		c.Header(TraceparentHeader, BuildTraceparent(traceID, parentSpanID))
 
 		// Attach trace ID and pulse instance to context
 		ctx := ContextWithTraceID(c.Request.Context(), traceID)

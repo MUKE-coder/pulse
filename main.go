@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 
 	"github.com/MUKE-coder/pulse/pulse"
@@ -19,11 +20,12 @@ func main() {
 	// Initialize Gin router
 	router := gin.Default()
 
-	// Mount Pulse
-	_ = pulse.Mount(router, db, pulse.Config{
-		AppName: "Blog API",
-		DevMode: true,
-	})
+	// Mount Pulse — Pulse's background goroutines exit when ctx is canceled.
+	ctx := context.Background()
+	_ = pulse.Mount(ctx, router, db,
+		pulse.WithAppName("Blog API"),
+		pulse.WithDevMode(),
+	)
 
 	// Sample API routes
 	router.GET("/", func(c *gin.Context) {

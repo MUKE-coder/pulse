@@ -1,6 +1,7 @@
 package pulse
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -24,7 +25,7 @@ func setupTestRouter(cfg ...Config) (*gin.Engine, *Pulse) {
 	if !c.DevMode {
 		c.DevMode = true
 	}
-	p := Mount(router, nil, c)
+	p := Mount(context.Background(), router, nil, WithConfig(c))
 
 	// Add test routes
 	router.GET("/users", func(c *gin.Context) {

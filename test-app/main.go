@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -22,10 +23,10 @@ func main() {
 	}
 
 	router := gin.New()
-	pulse.Mount(router, db, pulse.Config{
-		AppName: "Test App",
-		DevMode: true,
-	})
+	pulse.Mount(context.Background(), router, db,
+		pulse.WithAppName("Test App"),
+		pulse.WithDevMode(),
+	)
 
 	router.GET("/api/ping", func(c *gin.Context) {
 		c.JSON(200, gin.H{"pong": true})
@@ -48,9 +49,8 @@ func main() {
 		{"/pulse/ui/routes", 200, "", "<div id=\"root\">"},
 		{"/pulse/ui/errors", 200, "", "<div id=\"root\">"},
 
-		// Static assets
-		{"/pulse/ui/assets/index-CKc0di6z.js", 200, "", ""},
-		{"/pulse/ui/assets/index-DmEaoMqh.css", 200, "", ""},
+		// Static assets — discovered at runtime below since Vite's hash
+		// changes on every dashboard rebuild and is not stable across releases.
 
 		// API (auth required)
 		{"/pulse/api/auth/login", -1, "", ""}, // POST only

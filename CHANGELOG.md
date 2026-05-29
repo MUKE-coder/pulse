@@ -7,6 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.0] — 2026-05-29
+
+API ergonomics + OpenTelemetry interop. **This release contains breaking
+changes** to the public `Mount` signature; the upgrade is small and
+mechanical (see [Migrating from v0.1.0](#migrating-from-v010) below).
+
+### Added
+
+- **Functional-options API ([#10](https://github.com/MUKE-coder/pulse/issues/10) from the v0.1.0 review).**
+  A new `Option` type and a family of `With*` helpers (`WithAppName`,
+  `WithDevMode`, `WithCredentials`, `WithSecretKeyFile`, `WithSlackAlerts`,
+  `WithPrometheus`, `WithSlowRequestThreshold`, `WithSampleRate`, …) replace
+  the previous variadic `Config` argument. For callers that already build a
+  full `Config` (e.g. from YAML), `WithConfig(Config) Option` is the escape
+  hatch. See [pulse/options.go](pulse/options.go) for the full list.
+- **`context.Context` on `Mount` ([#15](https://github.com/MUKE-coder/pulse/issues/15) from the v0.1.0 review).**
+  `Mount` now takes a parent `context.Context` as its first argument. All
+  Pulse background goroutines (runtime sampler, retention sweeper, alert
+  engine, health runner, websocket hub) are tied to that context, so
+  cancelling it shuts Pulse down cleanly. `Pulse.Shutdown()` remains valid
+  but is now optional when the caller already manages a root context.
+- **W3C Trace Context interop ([#7](https://github.com/MUKE-coder/pulse/issues/7) from the v0.1.0 review).**
+  Pulse now reads the standard `traceparent` header on inbound requests
+  and adopts its `trace-id` as the Pulse trace ID, so traces continue across
+  service boundaries. Outbound requests sent through `WrapHTTPClient` get a
+  `traceparent` header injected with the current trace ID. Responses always
+  carry both `X-Pulse-Trace-ID` (legacy) and `traceparent` (W3C).
+- New public helpers: `pulse.GenerateSpanID()`, `pulse.ParseTraceparent()`,
+  `pulse.BuildTraceparent()`, and the `pulse.TraceparentHeader` constant.
+
+### Changed
+
+- **BREAKING:** `Mount(router, db, cfg)` → `Mount(ctx, router, db, opts...)`.
+  See [Migrating from v0.1.0](#migrating-from-v010).
+- Inbound request tracing now uses the upstream `traceparent` `trace-id`
+  when present and valid, instead of always generating a new ID. This is a
+  no-op for callers that don't talk to upstream services, but it makes
+  Pulse work alongside OTel-instrumented systems.
+- `examples/full/main.go` and `examples/with-sentinel/main.go` continue to
+  use `Config` via `WithConfig(...)` to demonstrate the escape hatch.
+- `examples/basic/main.go` and `test-app/main.go` are migrated to the
+  granular `With*` style.
+
+### Migrating from v0.1.0
+
+Smallest possible upgrade — wrap your existing `Config` in `WithConfig`:
+
+```go
+// v0.1.0
+p := pulse.Mount(router, db, pulse.Config{AppName: "Blog API", DevMode: true})
+
+// v0.2.0
+p := pulse.Mount(ctx, router, db, pulse.WithConfig(pulse.Config{
+    AppName: "Blog API",
+    DevMode: true,
+}))
+```
+
+Idiomatic upgrade — switch to granular options:
+
+```go
+p := pulse.Mount(ctx, router, db,
+    pulse.WithAppName("Blog API"),
+    pulse.WithDevMode(),
+)
+```
+
+If you do not have a `ctx` handy and don't want to manage one, pass
+`context.Background()`. To tie Pulse's lifecycle to your application's:
+
+```go
+ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+defer cancel()
+p := pulse.Mount(ctx, router, db, ...)
+// On SIGINT, ctx cancels and Pulse's background goroutines drain.
+```
+
+`Pulse.Shutdown()` still works; it's now redundant if you use ctx
+cancellation.
+
+---
+
 ## [0.1.0] — 2026-05-29
 
 First tagged release. This is a security and correctness pass on top of the
@@ -102,11 +184,9 @@ milestones.
 
 ## Roadmap
 
-These items were scoped during the v0.1.0 review but deferred to focused
+These items were scoped during earlier reviews but deferred to focused
 milestones:
 
-- **v0.2.0** — Functional options API, `context.Context` on the public surface,
-  W3C `traceparent` propagation.
 - **v0.3.0** — [#1](https://github.com/MUKE-coder/pulse/issues/1) SLO objects
   and burn-rate alerts.
 - **v0.4.0** — [#2](https://github.com/MUKE-coder/pulse/issues/2) N+1 detector
@@ -117,4 +197,5 @@ milestones:
 - **v1.0.0** — Persistent SQLite storage backend, embedded dashboard ported to
   Tailwind, public API freeze.
 
+[0.2.0]: https://github.com/MUKE-coder/pulse/releases/tag/v0.2.0
 [0.1.0]: https://github.com/MUKE-coder/pulse/releases/tag/v0.1.0

@@ -1,6 +1,7 @@
 package pulse
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -8,7 +9,7 @@ import (
 func setupAggregatorPulse(t *testing.T) *Pulse {
 	t.Helper()
 	cfg := applyDefaults(Config{})
-	p := newPulse(cfg)
+	p := newPulse(context.Background(), cfg)
 	p.storage = NewMemoryStorage("test")
 	t.Cleanup(func() { p.Shutdown() })
 	return p
@@ -123,7 +124,7 @@ func TestDetectTrend_Improving(t *testing.T) {
 	current := RouteStats{
 		RequestCount: 100,
 		P95Latency:   100 * time.Millisecond, // 50% decrease
-		ErrorRate:    0.5,                     // 75% decrease
+		ErrorRate:    0.5,                    // 75% decrease
 		RPM:          60.0,
 	}
 	previous := RouteStats{
@@ -401,7 +402,7 @@ func TestAggregator_Run(t *testing.T) {
 
 func TestAggregator_BackgroundLoop(t *testing.T) {
 	cfg := applyDefaults(Config{DevMode: true})
-	p := newPulse(cfg)
+	p := newPulse(context.Background(), cfg)
 	p.storage = NewMemoryStorage("test")
 	t.Cleanup(func() { p.Shutdown() })
 
@@ -426,7 +427,7 @@ func TestComputeCompositeHealth(t *testing.T) {
 	p := setupAggregatorPulse(t)
 	ms := p.storage.(*MemoryStorage)
 
-	// No checks → healthy
+	// No checks â†’ healthy
 	status := computeCompositeHealth(p, ms)
 	if status != "healthy" {
 		t.Errorf("expected 'healthy' with no checks, got %q", status)
@@ -461,7 +462,7 @@ func TestComputeCompositeHealth(t *testing.T) {
 
 func BenchmarkAggregatorRun(b *testing.B) {
 	cfg := applyDefaults(Config{})
-	p := newPulse(cfg)
+	p := newPulse(context.Background(), cfg)
 	p.storage = NewMemoryStorage("bench")
 	defer p.Shutdown()
 

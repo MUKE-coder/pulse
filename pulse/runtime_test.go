@@ -1,6 +1,7 @@
 package pulse
 
 import (
+	"context"
 	"runtime"
 	"testing"
 	"time"
@@ -13,7 +14,7 @@ func TestRuntimeSampler_CollectsMetrics(t *testing.T) {
 			SampleInterval: 100 * time.Millisecond,
 		},
 	})
-	p := newPulse(cfg)
+	p := newPulse(context.Background(), cfg)
 	p.storage = NewMemoryStorage("test")
 	defer p.Shutdown()
 
@@ -106,7 +107,7 @@ func TestLeakDetector_DetectsLeak(t *testing.T) {
 	}
 
 	now := time.Now()
-	// Simulate growing goroutine count: 100 → 300 over 50 minutes (within 1hr window)
+	// Simulate growing goroutine count: 100 â†’ 300 over 50 minutes (within 1hr window)
 	for i := 0; i < 600; i++ {
 		count := 100 + (i * 200 / 600)
 		ld.mu.Lock()
@@ -135,7 +136,7 @@ func TestLeakDetector_InsufficientData(t *testing.T) {
 		samples:   make([]goroutineSample, 0),
 	}
 
-	// Only one sample — not enough to detect
+	// Only one sample â€” not enough to detect
 	ld.addSample(100)
 
 	if ld.isLeaking() {

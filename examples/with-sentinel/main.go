@@ -38,7 +38,7 @@ func main() {
 
 	router := gin.Default()
 
-	p := pulse.Mount(router, db, pulse.Config{
+	p := pulse.Mount(context.Background(), router, db, pulse.WithConfig(pulse.Config{
 		AppName: "Sentinel Example",
 		DevMode: true,
 
@@ -111,7 +111,7 @@ func main() {
 		Prometheus: pulse.PrometheusConfig{
 			Enabled: true,
 		},
-	})
+	}))
 
 	// Register multiple health checks
 	p.AddHealthCheck(pulse.HealthCheck{

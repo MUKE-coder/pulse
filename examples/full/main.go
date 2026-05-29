@@ -49,8 +49,10 @@ func main() {
 
 	router := gin.Default()
 
-	// Mount Pulse with full configuration
-	p := pulse.Mount(router, db, pulse.Config{
+	// Mount Pulse with full configuration. This example shows the WithConfig
+	// escape hatch, which is convenient when you already build a Config from
+	// YAML or env vars. For one-off knobs, prefer the granular With* helpers.
+	p := pulse.Mount(context.Background(), router, db, pulse.WithConfig(pulse.Config{
 		Prefix:  "/pulse",
 		AppName: "E-Commerce API",
 		DevMode: true,
@@ -106,7 +108,7 @@ func main() {
 			Enabled: true,
 			Path:    "/metrics",
 		},
-	})
+	}))
 
 	// Add custom health checks
 	p.AddHealthCheck(pulse.HealthCheck{

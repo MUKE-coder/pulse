@@ -58,9 +58,16 @@ type Pulse struct {
 	logger *log.Logger
 }
 
-// newPulse creates a new Pulse engine with the given config.
-func newPulse(cfg Config) *Pulse {
-	ctx, cancel := context.WithCancel(context.Background())
+// newPulse creates a new Pulse engine with the given config. The returned
+// engine's background goroutines run until parent is canceled or [Pulse.Shutdown]
+// is called, whichever happens first.
+//
+// A nil parent is treated as [context.Background].
+func newPulse(parent context.Context, cfg Config) *Pulse {
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
 
 	p := &Pulse{
 		config:       cfg,
