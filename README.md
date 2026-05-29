@@ -433,6 +433,53 @@ The two-phase transition (OK -> Pending -> Firing) prevents false alerts from tr
 - `goroutine_growth` — Goroutine growth rate per hour
 - `health_status` — Composite health check status (1 = healthy, 0 = unhealthy)
 
+### SLOs and burn-rate alerts
+
+Declare service-level objectives directly in your config. Pulse continuously evaluates them against live traffic, exposes the current state at `GET /pulse/api/slos`, and fires alerts through the same Slack/Discord/Email/Webhook channels you've already wired up.
+
+```go
+pulse.Mount(ctx, router, db,
+    pulse.WithAppName("Checkout"),
+    pulse.WithSlackAlerts(os.Getenv("SLACK_WEBHOOK_URL")),
+    pulse.WithSLO(pulse.SLO{
+        Name:      "API availability",
+        Target:    0.999,                // 99.9% over 28 days
+        Window:    28 * 24 * time.Hour,
+        Indicator: pulse.SLIErrorRate{Routes: []string{"/api/*"}},
+        // BurnRateAlerts: nil → DefaultBurnRateAlerts() — see below
+    }),
+    pulse.WithSLO(pulse.SLO{
+        Name:      "API latency",
+        Target:    0.95,                 // 95% under 500ms
+        Window:    30 * 24 * time.Hour,
+        Indicator: pulse.SLILatency{
+            Routes:    []string{"/api/*"},
+            Threshold: 500 * time.Millisecond,
+        },
+    }),
+)
+```
+
+**Indicators:**
+
+| SLI | "Good" event |
+|-----|--------------|
+| `SLIErrorRate{Routes}` | response with status code < 500 on a matching route (4xx counts as good — client errors don't burn server SLOs) |
+| `SLILatency{Routes, Threshold}` | non-5xx response below `Threshold` on a matching route |
+
+`Routes` uses the same glob style as `Tracing.ExcludePaths` (`/api/*` matches `/api/users/1` etc.). An empty `Routes` slice matches every request.
+
+**Burn-rate alerts** (Google SRE workbook recommendation, applied by default):
+
+| Name | Window | Burn rate | Severity |
+|------|--------|-----------|----------|
+| `fast-burn` | 1h | 14.4× | critical |
+| `slow-burn` | 6h | 6.0×  | warning  |
+
+A burn rate of N× means the SLO is consuming its monthly error budget N× faster than allowed. Fast-burn fires when 2% of the monthly budget is spent in an hour; slow-burn fires when 5% is spent in 6 hours. Override per-SLO via `BurnRateAlerts: []pulse.BurnRateAlert{...}`.
+
+**Why burn rate, not raw error rate?** A 0.5% error rate is catastrophic for a 99.99% SLO (50× burn) and unremarkable for a 90% SLO (0.05× burn). Same number, totally different meaning. Burn rate normalises against the SLO you actually care about.
+
 ### Prometheus
 
 ```go
@@ -615,6 +662,12 @@ All endpoints under `/pulse/api/` require JWT authentication (except login).
 | Method | Endpoint | Query Params | Description |
 |--------|----------|--------------|-------------|
 | `GET` | `/pulse/api/alerts` | `?state=firing&severity=critical&limit=50` | List alerts |
+
+### SLOs
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/pulse/api/slos` | Current SLOStatus per configured SLO, including per-window burn rate and budget consumed |
 
 ### Settings & Data
 
@@ -956,7 +1009,6 @@ Pulse follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The cu
 
 | Version | Theme |
 |---------|-------|
-| `v0.3.0` | SLO objects + burn-rate alerts ([#1](https://github.com/MUKE-coder/pulse/issues/1)) |
 | `v0.4.0` | N+1 detector enhancements ([#2](https://github.com/MUKE-coder/pulse/issues/2)) + USE method dashboard ([#3](https://github.com/MUKE-coder/pulse/issues/3)) |
 | `v0.5.0` | k6 test-run overlay + pprof flame graph ([#4](https://github.com/MUKE-coder/pulse/issues/4)) |
 | `v1.0.0` | Persistent SQLite storage backend, dashboard ported to Tailwind, public API freeze |

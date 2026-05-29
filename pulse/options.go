@@ -218,3 +218,13 @@ func WithPrometheusPath(path string) Option {
 		c.Prometheus.Path = path
 	}
 }
+
+// --- SLOs ---
+
+// WithSLO appends a single SLO to track. Multiple calls accumulate.
+//
+// If the SLO's BurnRateAlerts is nil, [DefaultBurnRateAlerts] is applied at
+// evaluation time.
+func WithSLO(slo SLO) Option {
+	return func(c *Config) { c.SLOs = append(c.SLOs, slo) }
+}

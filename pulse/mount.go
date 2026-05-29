@@ -117,6 +117,12 @@ func Mount(ctx context.Context, router *gin.Engine, db *gorm.DB, opts ...Option)
 		p.alertEngine = newAlertEngine(p)
 	}
 
+	// Start SLO evaluator after the alert engine so burn-rate alerts can
+	// reuse the notification channels.
+	if len(cfg.SLOs) > 0 {
+		p.sloEvaluator = newSLOEvaluator(p, cfg.SLOs)
+	}
+
 	// Register error tracking middleware (outermost — catches panics from all handlers)
 	if boolValue(cfg.Errors.Enabled) {
 		router.Use(newErrorMiddleware(p))

@@ -153,6 +153,9 @@ func registerAPIRoutes(router *gin.Engine, p *Pulse) {
 	// Alerts
 	protected.GET("/alerts", alertsListHandler(p))
 
+	// SLOs
+	protected.GET("/slos", slosListHandler(p))
+
 	// Settings & data
 	protected.GET("/settings", settingsHandler(p))
 	protected.POST("/data/reset", dataResetHandler(p))
@@ -577,6 +580,18 @@ func alertsListHandler(p *Pulse) gin.HandlerFunc {
 		}
 		alerts, _ := p.storage.GetAlerts(filter)
 		c.JSON(http.StatusOK, alerts)
+	}
+}
+
+// --- SLOs ---
+
+func slosListHandler(p *Pulse) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if p.sloEvaluator == nil {
+			c.JSON(http.StatusOK, []SLOStatus{})
+			return
+		}
+		c.JSON(http.StatusOK, p.sloEvaluator.Snapshot())
 	}
 }
 

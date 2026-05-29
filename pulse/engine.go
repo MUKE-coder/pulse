@@ -49,6 +49,9 @@ type Pulse struct {
 	// Alert engine
 	alertEngine *AlertEngine
 
+	// SLO evaluator (nil if no SLOs configured)
+	sloEvaluator *sloEvaluator
+
 	// Lifecycle management
 	ctx    context.Context
 	cancel context.CancelFunc

@@ -7,6 +7,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.0] — 2026-05-29
+
+Implements [#1](https://github.com/MUKE-coder/pulse/issues/1) — SLO objects
+with multi-window burn-rate alerts. This is purely additive; no breaking
+changes.
+
+### Added
+
+- **`pulse.SLO` type** declares a service-level objective: a target
+  compliance ratio, a sliding window, and an `SLI` that decides which events
+  count as "good". Two SLIs ship today — both match routes with
+  `filepath.Match` globs and are scope-aware:
+  - **`pulse.SLIErrorRate`** — non-5xx responses are good. (4xx counts as
+    good because client errors don't burn server SLOs.)
+  - **`pulse.SLILatency{Threshold}`** — non-5xx responses below the latency
+    threshold are good.
+- **`pulse.BurnRateAlert`** declares one window-and-multiple alert rule
+  attached to an SLO. **`pulse.DefaultBurnRateAlerts()`** returns the
+  multi-window set recommended by Google's SRE workbook: a fast-burn
+  page (1h window, 14.4× burn rate, critical) and a slow-burn ticket
+  (6h window, 6× burn rate, warning). When `SLO.BurnRateAlerts` is nil the
+  defaults are applied at evaluation time.
+- **`pulse.WithSLO(SLO)` option** appends an SLO to the config.
+- **SLO evaluator goroutine.** Tied to the Mount ctx like every other Pulse
+  background. Ticks every 30 s (10 s in DevMode), scans the request ring
+  buffer once across the widest configured window, then evaluates each SLO
+  + each burn-rate sub-window in memory. Burn-rate transitions go through
+  the existing alert pipeline, so they land in `/pulse/api/alerts` and fire
+  Slack / Discord / Email / Webhook notifications just like rule-based
+  alerts.
+- **`GET /pulse/api/slos`** — authenticated endpoint returning the live
+  `SLOStatus` for every configured SLO, including per-window burn rate and
+  budget remaining/consumed percentages. Returns `[]` when no SLOs are
+  configured.
+- New tests: `pulse/slo_test.go` covers SLI classification, budget-consumed
+  math, end-to-end fire/resolve over two evaluator ticks, and the API
+  endpoint round-trip.
+
+### Changed
+
+- `Config` gains a `SLOs []SLO` field. Zero-value (empty slice or `nil`)
+  preserves the previous behaviour — the evaluator is not started.
+
+### Why burn rate, not raw error rate?
+
+Burn rate normalises against the SLO's own error budget. A 0.5% error rate is
+catastrophic for a 99.99% SLO (50× burn) and unremarkable for a 90% SLO
+(0.05× burn). Same number, totally different operational meaning. See
+[Google's "Alerting on SLOs"](https://sre.google/workbook/alerting-on-slos/)
+for the full argument.
+
+### Example
+
+```go
+ctx := context.Background()
+p := pulse.Mount(ctx, router, db,
+    pulse.WithAppName("Checkout"),
+    pulse.WithSlackAlerts(os.Getenv("SLACK_WEBHOOK_URL")),
+    pulse.WithSLO(pulse.SLO{
+        Name:      "API availability",
+        Target:    0.999,             // 99.9% over 28 days
+        Window:    28 * 24 * time.Hour,
+        Indicator: pulse.SLIErrorRate{Routes: []string{"/api/*"}},
+        // BurnRateAlerts: nil → DefaultBurnRateAlerts() applied automatically
+    }),
+    pulse.WithSLO(pulse.SLO{
+        Name:      "API latency",
+        Target:    0.95,              // 95% under 500ms over 30 days
+        Window:    30 * 24 * time.Hour,
+        Indicator: pulse.SLILatency{Routes: []string{"/api/*"}, Threshold: 500 * time.Millisecond},
+    }),
+)
+```
+
+---
+
 ## [0.2.0] — 2026-05-29
 
 API ergonomics + OpenTelemetry interop. **This release contains breaking
@@ -187,8 +263,6 @@ milestones.
 These items were scoped during earlier reviews but deferred to focused
 milestones:
 
-- **v0.3.0** — [#1](https://github.com/MUKE-coder/pulse/issues/1) SLO objects
-  and burn-rate alerts.
 - **v0.4.0** — [#2](https://github.com/MUKE-coder/pulse/issues/2) N+1 detector
   enhancements + [#3](https://github.com/MUKE-coder/pulse/issues/3) USE
   method dashboard.
@@ -197,5 +271,6 @@ milestones:
 - **v1.0.0** — Persistent SQLite storage backend, embedded dashboard ported to
   Tailwind, public API freeze.
 
+[0.3.0]: https://github.com/MUKE-coder/pulse/releases/tag/v0.3.0
 [0.2.0]: https://github.com/MUKE-coder/pulse/releases/tag/v0.2.0
 [0.1.0]: https://github.com/MUKE-coder/pulse/releases/tag/v0.1.0

@@ -9,7 +9,7 @@ import (
 )
 
 // Version is the current Pulse SDK version, bumped on each release.
-const Version = "0.2.0"
+const Version = "0.3.0"
 
 // DefaultUsername is the placeholder dashboard username shipped in defaults.
 // In production (DevMode=false) Pulse refuses to start while this value is in
@@ -65,6 +65,11 @@ type Config struct {
 
 	// Prometheus configures the optional Prometheus endpoint.
 	Prometheus PrometheusConfig
+
+	// SLOs declares service-level objectives Pulse should track. Each SLO
+	// is evaluated on a tick; burn-rate breaches synthesize alerts through
+	// the standard notification channels. See [SLO] and [BurnRateAlert].
+	SLOs []SLO
 
 	// DevMode enables verbose logging and more frequent aggregation.
 	DevMode bool
