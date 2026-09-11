@@ -179,6 +179,11 @@ func Mount(ctx context.Context, router *gin.Engine, db *gorm.DB, opts ...Option)
 		p.sloEvaluator.start()
 	}
 
+	// With storage shared by several instances, elect the one that runs
+	// application-wide alerting and retention. Started after the alert
+	// engine and SLO evaluator, which a new leader hands open alerts to.
+	startLeaderElection(p)
+
 	// Start USE-method host-resource sampler.
 	if boolValue(cfg.USE.Enabled) {
 		p.useSampler = newUSESampler(p)
@@ -256,7 +261,10 @@ func startRetentionSweeper(p *Pulse) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				p.internalError("storage: retention sweep", p.storage.Cleanup(retention))
+				// With shared storage, the leader sweeps for every instance.
+				if p.isLeader() {
+					p.internalError("storage: retention sweep", p.storage.Cleanup(retention))
+				}
 			}
 		}
 	})

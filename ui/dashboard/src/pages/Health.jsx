@@ -1,8 +1,10 @@
 import { useState, useEffect } from 'react'
 import { useAPI } from '../hooks/useAPI'
 import { useWebSocket } from '../hooks/useWebSocket'
+import { useInstances } from '../hooks/useInstances'
 import StatusBadge from '../components/StatusBadge'
 import DataTable from '../components/DataTable'
+import InstancePicker from '../components/InstancePicker'
 
 export default function HealthPage() {
   const { get, post } = useAPI()
@@ -11,16 +13,23 @@ export default function HealthPage() {
   const [history, setHistory] = useState([])
   const [loading, setLoading] = useState(true)
   const { lastMessage } = useWebSocket(['health'])
+  const { instances, self } = useInstances()
+  const [instance, setInstance] = useState('')
+  const shown = instance || self
+  // Checks run where they are registered: only this instance's can be run
+  // from here.
+  const local = !shown || shown === self
+  const which = shown ? `instance=${encodeURIComponent(shown)}` : ''
 
   const fetchHealth = async () => {
     try {
-      const res = await get('/health/checks')
+      const res = await get(`/health/checks?${which}`)
       if (res.ok) setHealth(await res.json())
     } catch {}
     setLoading(false)
   }
 
-  useEffect(() => { fetchHealth() }, [])
+  useEffect(() => { fetchHealth() }, [shown])
 
   useEffect(() => {
     if (lastMessage?.type === 'health') fetchHealth()
@@ -29,7 +38,7 @@ export default function HealthPage() {
   const fetchHistory = async (name) => {
     setSelectedCheck(name)
     try {
-      const res = await get(`/health/checks/${name}/history?limit=20`)
+      const res = await get(`/health/checks/${name}/history?limit=20&${which}`)
       if (res.ok) setHistory(await res.json())
     } catch {}
   }
@@ -58,7 +67,10 @@ export default function HealthPage() {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <h1 style={{ fontSize: 22, fontWeight: 700 }}>Health</h1>
-        <StatusBadge status={status} />
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+          <InstancePicker instances={instances} value={shown} onChange={setInstance} />
+          <StatusBadge status={status} />
+        </div>
       </div>
 
       {health?.uptime && (
@@ -83,7 +95,7 @@ export default function HealthPage() {
               <span style={{ color: '#64748b', fontSize: 12 }}>
                 Latency: <span style={{ color: '#e2e8f0' }}>{check.latency_ms?.toFixed(1)}ms</span>
               </span>
-              <button
+              {local && <button
                 onClick={(e) => { e.stopPropagation(); runCheck(name) }}
                 style={{
                   padding: '3px 10px', borderRadius: 4, fontSize: 11, fontWeight: 600,
@@ -92,7 +104,7 @@ export default function HealthPage() {
                 }}
               >
                 Run
-              </button>
+              </button>}
             </div>
             {check.error && (
               <p style={{ color: '#ef4444', fontSize: 12, marginTop: 8 }}>{check.error}</p>

@@ -127,13 +127,19 @@ func TestSQLBackends_RollupsUpsertAndLoad(t *testing.T) {
 					routes: map[rollupRouteKey]routeCounts{{"GET", "/x"}: {total: total, status5xx: 1, latency: time.Second}},
 					hist:   &h, slos: map[string]sloCount{"avail": {good: total - 1, total: total}}}
 			}
-			if err := s.saveRollups([]minuteSnapshot{snap(5)}); err != nil {
+			if err := s.saveRollups("a", []minuteSnapshot{snap(5)}); err != nil {
 				t.Fatal(err)
 			}
-			if err := s.saveRollups([]minuteSnapshot{snap(9)}); err != nil {
+			if err := s.saveRollups("a", []minuteSnapshot{snap(9)}); err != nil {
 				t.Fatal(err)
 			}
-			got, err := s.loadRollups(minute - 1)
+			if err := s.saveRollups("b", []minuteSnapshot{snap(4)}); err != nil {
+				t.Fatal(err)
+			}
+			if peers, _, err := s.loadPeerRollups("a", minute-1, 0); err != nil || len(peers) != 1 || len(peers["b"]) != 1 {
+				t.Errorf("a's peers = %v (err %v), want b's one minute", peers, err)
+			}
+			got, err := s.loadRollups("a", minute-1)
 			if err != nil || len(got) != 1 {
 				t.Fatalf("loaded %d minutes (err %v)", len(got), err)
 			}

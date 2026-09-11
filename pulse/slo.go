@@ -293,6 +293,8 @@ func (ev *sloEvaluator) restoreFiring() {
 			newest[a.RuleName] = a
 		}
 	}
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
 	for _, slo := range ev.slos {
 		for _, ba := range slo.BurnRateAlerts {
 			a, ok := newest[sloRuleName(slo, ba)]
@@ -305,6 +307,18 @@ func (ev *sloEvaluator) restoreFiring() {
 			ev.firing[slo.Name][ba.Name] = sloFiring{id: a.ID, firedAt: a.FiredAt, burnRate: a.Value}
 		}
 	}
+}
+
+// adoptOpenAlerts re-reads open burn-rate alerts when this instance becomes
+// the leader, taking over those the previous leader left firing — and
+// forgetting any it resolved meanwhile.
+func (ev *sloEvaluator) adoptOpenAlerts() {
+	ev.evalMu.Lock()
+	defer ev.evalMu.Unlock()
+	ev.mu.Lock()
+	ev.firing = make(map[string]map[string]sloFiring, len(ev.slos))
+	ev.mu.Unlock()
+	ev.restoreFiring()
 }
 
 func sloRuleName(slo SLO, ba BurnRateAlert) string {
@@ -373,7 +387,10 @@ func (ev *sloEvaluator) evaluateSLO(slo SLO, now time.Time) {
 				worstStatus = ba.Name
 			}
 		}
-		ev.reconcileAlert(slo, ba, burnRate, wCompliance, firing, now)
+		// Every instance shows SLO status; only the leader alerts on it.
+		if ev.pulse.isLeader() {
+			ev.reconcileAlert(slo, ba, burnRate, wCompliance, firing, now)
+		}
 	}
 
 	if consumed >= 1 {

@@ -246,7 +246,7 @@ curl http://localhost:8080/pulse/api/overview \
 
 ### Storage
 
-Pulse ships with two storage backends. Pick one when you mount:
+Pulse ships with three storage backends. Pick one when you mount:
 
 ```go
 // In-memory (default, fastest):
@@ -254,6 +254,10 @@ pulse.Mount(ctx, router, db /*, no Storage option needed */)
 
 // SQLite (persistent across restarts):
 pulse.Mount(ctx, router, db, pulse.WithSQLite("pulse.db"))
+
+// PostgreSQL (persistent, and shared by several replicas):
+import _ "github.com/jackc/pgx/v5/stdlib"
+pulse.Mount(ctx, router, db, pulse.WithPostgres("postgres://user:pass@db:5432/app"))
 ```
 
 Or set them on the Config struct directly:
@@ -270,6 +274,8 @@ Storage: pulse.StorageConfig{
 
 **SQLite backend** — pure Go (no CGo), WAL journal mode, `busy_timeout=5000ms`. The schema is created automatically on first open. Metric writes are queued and committed in batches by a single writer (up to 500 rows, or every 250 ms), so storing never blocks a request. If the queue fills, records are dropped and counted rather than slowing your app. Reads always see earlier writes, and a crash loses at most the last quarter-second. Comes from `github.com/glebarez/go-sqlite`, already a transitive dependency, so no new module is pulled in for Memory-only consumers.
 
+**PostgreSQL backend** — the same batched writer and schema as SQLite, in a schema of its own (`pulse` by default; `WithPostgresSchema`), so it can share the application's database. Several replicas can record into it at once; see [Running multiple replicas](#running-multiple-replicas). Pulse doesn't import a PostgreSQL driver itself: import `github.com/jackc/pgx/v5/stdlib` or `github.com/lib/pq`. To manage the connection pool yourself, build the backend with `pulse.NewPostgresStorage(sqlDB, appName, schema)` and pass it with `pulse.WithStorage`.
+
 A background **retention sweeper** runs every minute (every 10 s in `DevMode`) against both backends, dropping records older than `RetentionHours`. Ring buffers also self-trim by overwriting their oldest entries.
 
 **Exact counts, whatever the sample rate.** Alongside the stored records, Pulse keeps per-minute tallies of every request: counts, 4xx/5xx, a latency histogram, and SLO good/total events. Overview totals, error rates, SLOs and load-test comparisons come from these, so `Tracing.SampleRate` and ring-buffer size never skew them. With SQLite they are saved every 30 s and restored at startup.
@@ -280,14 +286,27 @@ A background **retention sweeper** runs every minute (every 10 s in `DevMode`) a
 
 #### Running multiple replicas
 
-Each replica keeps its own data (in memory, or in its own SQLite file), so each replica's dashboard shows only that replica's traffic. For dashboard logins to work on every replica:
+With the Memory or SQLite backend, each replica keeps its own data and its dashboard shows only its own traffic. To run several replicas as one application, give them shared storage in PostgreSQL:
 
-- Give every replica the **same signing key**: `pulse.WithSecretKey(os.Getenv("PULSE_SECRET"))` (recommended), or a `SecretKeyFile` on a shared volume. Replicas that start at the same moment against one key file agree on a single key.
-- Pin each browser's dashboard traffic to one replica (sticky sessions), so it doesn't flip between replicas' data.
-- If several replicas share a host, give each its own `pulse.WithInstanceID(...)`. It defaults to the hostname and appears on the dashboard and in `pulse_build_info`.
-- The login rate limit and alert evaluation run per replica, so each replica sends its own notifications.
+```go
+import _ "github.com/jackc/pgx/v5/stdlib" // or github.com/lib/pq
 
-[`examples/multi-instance`](examples/multi-instance) runs two replicas behind Caddy. A shared storage backend is planned for v1.2.
+pulse.Mount(ctx, router, db,
+    pulse.WithPostgres(os.Getenv("PULSE_DSN")),     // tables go in the "pulse" schema
+    pulse.WithSecretKey(os.Getenv("PULSE_SECRET")), // the same on every replica
+)
+```
+
+- **One dashboard.** Every replica records into the same tables, so any replica's dashboard shows all of them: totals, error rates, SLOs, charts and test-run comparisons count every replica's requests. The Overview lists each instance with its status and traffic; the Runtime and Health pages have an instance picker.
+- **One page per incident.** One replica is elected leader through a PostgreSQL advisory lock. It evaluates the application-wide alert rules (latency, error rate, retention) and SLO burn rates, sends their notifications and sweeps retention, so three replicas send one page, not three. If the leader stops or its database connection dies, another replica takes over within seconds and picks up the alerts the leader left open.
+- **Per-replica rules stay per replica.** Rules about a single process (memory, goroutines, health checks, dropped writes) are evaluated by every replica about itself, and their alerts name the replica.
+- **Same signing key everywhere.** Use `pulse.WithSecretKey(os.Getenv("PULSE_SECRET"))` (recommended), or a `SecretKeyFile` on a shared volume; replicas that start at the same moment against one key file agree on a single key.
+- **Distinct instance IDs.** `pulse.WithInstanceID(...)` defaults to the hostname, which is unique per container; set it when several replicas share a host.
+- The login rate limit is per replica. `pulse.WithPostgresSchema(name)` keeps two applications that share a database apart.
+
+Without shared storage, pin each browser's dashboard traffic to one replica (sticky sessions), so it doesn't flip between replicas' data, and expect each replica to send its own alerts.
+
+[`examples/multi-instance`](examples/multi-instance) runs two replicas and PostgreSQL behind Caddy.
 
 ### Request Tracing
 

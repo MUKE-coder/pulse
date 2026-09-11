@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react'
 import { useAPI } from '../hooks/useAPI'
 import { useWebSocket } from '../hooks/useWebSocket'
+import { useInstances } from '../hooks/useInstances'
 import StatCard from '../components/StatCard'
+import InstancePicker from '../components/InstancePicker'
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from 'recharts'
 import {
   DataBanner, fmtClock, overlayElements, timeAxisProps, timeDomain, useTimelineOverlays,
@@ -26,12 +28,16 @@ export default function RuntimePage() {
   const [loading, setLoading] = useState(true)
   const { lastMessage } = useWebSocket(['runtime'])
   const overlays = useTimelineOverlays(range)
+  const { instances, self } = useInstances()
+  const [instance, setInstance] = useState('')
+  const shown = instance || self
 
   const fetchData = async () => {
+    const which = shown ? `instance=${encodeURIComponent(shown)}` : ''
     try {
       const [cRes, hRes, iRes] = await Promise.all([
-        get('/runtime/current'),
-        get(`/runtime/history?range=${range}`),
+        get(`/runtime/current?${which}`),
+        get(`/runtime/history?range=${range}&${which}`),
         get('/runtime/info'),
       ])
       if (cRes.ok) setCurrent(await cRes.json())
@@ -41,7 +47,7 @@ export default function RuntimePage() {
     setLoading(false)
   }
 
-  useEffect(() => { fetchData() }, [range])
+  useEffect(() => { fetchData() }, [range, shown])
 
   useEffect(() => {
     if (lastMessage?.type === 'runtime' && lastMessage?.data) {
@@ -66,6 +72,8 @@ export default function RuntimePage() {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <h1 style={{ fontSize: 22, fontWeight: 700 }}>Runtime</h1>
+        <div style={{ display: 'flex', gap: 8 }}>
+        <InstancePicker instances={instances} value={shown} onChange={setInstance} />
         <select value={range} onChange={(e) => setRange(e.target.value)}>
           <option value="5m">5m</option>
           <option value="15m">15m</option>
@@ -73,6 +81,7 @@ export default function RuntimePage() {
           <option value="6h">6h</option>
           <option value="24h">24h</option>
         </select>
+        </div>
       </div>
 
       <DataBanner lifecycle={overlays.lifecycle} range={range} />
@@ -115,8 +124,8 @@ export default function RuntimePage() {
         </ResponsiveContainer>
       </div>
 
-      {/* System Info */}
-      {info && (
+      {/* System Info — of the process serving the dashboard, so only shown for it */}
+      {info && (!shown || shown === self) && (
         <div style={{ background: '#111118', border: '1px solid #1e1e2e', borderRadius: 8, padding: 16 }}>
           <h3 style={{ fontSize: 13, color: '#64748b', marginBottom: 12, fontWeight: 600 }}>SYSTEM INFO</h3>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, fontSize: 13 }}>

@@ -376,6 +376,11 @@ func rollupRequests(storage Storage, tr TimeRange, resolution time.Duration) []T
 // RollupRuntime buckets runtime metrics into time intervals. Exported for API use.
 func RollupRuntime(storage Storage, tr TimeRange, resolution time.Duration) []RuntimeMetric {
 	history, _ := storage.GetRuntimeHistory(tr)
+	return bucketRuntime(history, resolution)
+}
+
+// bucketRuntime keeps the latest sample in each resolution-wide bucket.
+func bucketRuntime(history []RuntimeMetric, resolution time.Duration) []RuntimeMetric {
 	if len(history) == 0 {
 		return nil
 	}

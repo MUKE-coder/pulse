@@ -172,6 +172,7 @@ func registerAPIRoutes(router *gin.Engine, p *Pulse) {
 
 	// Lifecycle (process start/stop events, data coverage)
 	protected.GET("/lifecycle", lifecycleHandler(p))
+	protected.GET("/instances", instancesHandler(p))
 
 	// Storage capacity (buffer fill, effective retention, dropped writes)
 	protected.GET("/storage", storageHandler(p))
@@ -524,26 +525,39 @@ func errorDeleteHandler(p *Pulse) gin.HandlerFunc {
 
 // --- Runtime ---
 
+// runtimeCurrentHandler serves the latest runtime sample of one instance
+// (?instance=, default this one).
 func runtimeCurrentHandler(p *Pulse) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		instance := p.instanceParam(c)
 		history, _ := p.storage.GetRuntimeHistory(TimeRange{
 			Start: time.Now().Add(-1 * time.Minute),
 			End:   time.Now().Add(1 * time.Minute),
 		})
-		if len(history) == 0 {
-			c.JSON(http.StatusOK, gin.H{"message": "no runtime data yet"})
-			return
+		for i := len(history) - 1; i >= 0; i-- {
+			if p.matchesInstance(history[i].InstanceID, instance) {
+				c.JSON(http.StatusOK, history[i])
+				return
+			}
 		}
-		c.JSON(http.StatusOK, history[len(history)-1])
+		c.JSON(http.StatusOK, gin.H{"message": "no runtime data yet"})
 	}
 }
 
+// runtimeHistoryHandler serves one instance's runtime samples (?instance=,
+// default this one), bucketed for the range.
 func runtimeHistoryHandler(p *Pulse) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		tr := parseTimeRangeParam(c)
-		resolution := ResolutionForRange(tr)
-		history := RollupRuntime(p.storage, tr, resolution)
-		c.JSON(http.StatusOK, history)
+		instance := p.instanceParam(c)
+		history, _ := p.storage.GetRuntimeHistory(tr)
+		own := history[:0]
+		for _, m := range history {
+			if p.matchesInstance(m.InstanceID, instance) {
+				own = append(own, m)
+			}
+		}
+		c.JSON(http.StatusOK, bucketRuntime(own, ResolutionForRange(tr)))
 	}
 }
 
@@ -559,19 +573,38 @@ func runtimeInfoHandler(p *Pulse) gin.HandlerFunc {
 
 // --- Health (authed dashboard version) ---
 
+// healthChecksHandler serves one instance's health (?instance=, default
+// this one).
 func healthChecksHandler(p *Pulse) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		resp := buildHealthResponse(p)
-		c.JSON(http.StatusOK, resp)
+		if instance := c.Query("instance"); instance != "" && instance != p.config.InstanceID {
+			c.JSON(http.StatusOK, buildPeerHealthResponse(p, instance))
+			return
+		}
+		c.JSON(http.StatusOK, buildHealthResponse(p))
 	}
 }
 
+// healthCheckHistoryHandler serves a check's recent results, optionally for
+// one instance (?instance=).
 func healthCheckHistoryHandler(p *Pulse) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		name := c.Param("name")
 		limit := queryInt(c, "limit", 100)
-		history, _ := p.storage.GetHealthHistory(name, limit)
-		c.JSON(http.StatusOK, history)
+		instance := c.Query("instance")
+		if instance == "" {
+			history, _ := p.storage.GetHealthHistory(name, limit)
+			c.JSON(http.StatusOK, history)
+			return
+		}
+		history, _ := p.storage.GetHealthHistory(name, min(limit*10, 1000))
+		own := history[:0]
+		for _, r := range history {
+			if p.matchesInstance(r.InstanceID, instance) && len(own) < limit {
+				own = append(own, r)
+			}
+		}
+		c.JSON(http.StatusOK, own)
 	}
 }
 

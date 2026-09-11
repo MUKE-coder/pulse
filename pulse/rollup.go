@@ -59,7 +59,9 @@ type sloRollup struct {
 	counts map[int64]*sloCount
 }
 
-// rollups holds per-minute tallies keyed by Unix minute.
+// rollups holds per-minute tallies keyed by Unix minute: this instance's
+// own, and — when instances share the storage — each other instance's,
+// loaded as they save them. Reads cover them all.
 type rollups struct {
 	mu      sync.Mutex
 	detail  time.Duration // how long per-route counts and latency histograms are kept
@@ -68,6 +70,10 @@ type rollups struct {
 	since   time.Time      // earliest moment the rollups cover
 	persist bool           // a rollupStore is attached: track changed minutes
 	dirty   map[int64]bool // minutes changed since the last takeDirty
+
+	peersMu       sync.Mutex
+	peers         map[string]*rollups // other instances' rollups, by instance ID
+	peerWatermark int64               // latest save time of peer rows loaded (Unix ms)
 }
 
 func newRollups(detail time.Duration, slos []SLO, now time.Time) *rollups {
@@ -164,10 +170,45 @@ func (r *rollups) observe(method, fullPath, path string, status int, latency tim
 // minuteRange returns the Unix minutes overlapping [from, to], clipped to
 // the data the rollups actually hold.
 func (r *rollups) minuteRange(from, to time.Time) (first, last int64) {
-	if from.Before(r.since) {
-		from = r.since
+	if since := r.dataSince(); from.Before(since) {
+		from = since
 	}
 	return minuteOf(from), minuteOf(to)
+}
+
+// members returns this instance's rollups followed by its peers'.
+func (r *rollups) members() []*rollups {
+	r.peersMu.Lock()
+	defer r.peersMu.Unlock()
+	out := make([]*rollups, 0, 1+len(r.peers))
+	out = append(out, r)
+	for _, p := range r.peers {
+		out = append(out, p)
+	}
+	return out
+}
+
+// peer returns instance id's rollups, creating them — tracking the same
+// SLOs as this instance's — on first use.
+func (r *rollups) peer(id string) *rollups {
+	r.peersMu.Lock()
+	defer r.peersMu.Unlock()
+	if p := r.peers[id]; p != nil {
+		return p
+	}
+	r.mu.Lock()
+	slos := make([]SLO, 0, len(r.slos))
+	for _, s := range r.slos {
+		slos = append(slos, s.slo)
+	}
+	detail := r.detail
+	r.mu.Unlock()
+	if r.peers == nil {
+		r.peers = make(map[string]*rollups)
+	}
+	p := newRollups(detail, slos, time.Now()) // restore moves since back to its data
+	r.peers[id] = p
+	return p
 }
 
 // rollupSummary is the global view of a span of minutes.
@@ -179,17 +220,24 @@ type rollupSummary struct {
 // summary returns global totals and the merged latency histogram for the
 // minutes overlapping [from, to].
 func (r *rollups) summary(from, to time.Time) rollupSummary {
-	r.mu.Lock()
 	first, last := r.minuteRange(from, to)
-	r.mu.Unlock()
 	return r.summaryMinutes(first, last)
 }
 
-// summaryMinutes is summary over the Unix minutes [first, last].
+// summaryMinutes is summary over the Unix minutes [first, last], across
+// this instance and its peers.
 func (r *rollups) summaryMinutes(first, last int64) rollupSummary {
+	var s rollupSummary
+	for _, m := range r.members() {
+		m.addOwnSummary(&s, first, last)
+	}
+	return s
+}
+
+// addOwnSummary adds this instance's own minutes [first, last] to s.
+func (r *rollups) addOwnSummary(s *rollupSummary, first, last int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	var s rollupSummary
 	for m := first; m <= last; m++ {
 		b := r.minutes[m]
 		if b == nil {
@@ -200,15 +248,43 @@ func (r *rollups) summaryMinutes(first, last int64) rollupSummary {
 		}
 		s.hist.merge(&b.hist)
 	}
-	return s
+}
+
+// instanceSummaries returns each instance's own totals for the minutes
+// overlapping [from, to]: this instance's under self, and each peer's.
+func (r *rollups) instanceSummaries(self string, from, to time.Time) map[string]routeCounts {
+	first, last := r.minuteRange(from, to)
+	var own rollupSummary
+	r.addOwnSummary(&own, first, last)
+	out := map[string]routeCounts{self: own.counts}
+
+	r.peersMu.Lock()
+	peers := make(map[string]*rollups, len(r.peers))
+	for id, p := range r.peers {
+		peers[id] = p
+	}
+	r.peersMu.Unlock()
+	for id, p := range peers {
+		var s rollupSummary
+		p.addOwnSummary(&s, first, last)
+		out[id] = s.counts
+	}
+	return out
 }
 
 // routeTotals returns per-route totals for the minutes overlapping [from, to].
 func (r *rollups) routeTotals(from, to time.Time) map[rollupRouteKey]routeCounts {
+	first, last := r.minuteRange(from, to)
+	out := make(map[rollupRouteKey]routeCounts)
+	for _, m := range r.members() {
+		m.addOwnRouteTotals(out, first, last)
+	}
+	return out
+}
+
+func (r *rollups) addOwnRouteTotals(out map[rollupRouteKey]routeCounts, first, last int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make(map[rollupRouteKey]routeCounts)
-	first, last := r.minuteRange(from, to)
 	for m := first; m <= last; m++ {
 		b := r.minutes[m]
 		if b == nil {
@@ -220,19 +296,27 @@ func (r *rollups) routeTotals(from, to time.Time) map[rollupRouteKey]routeCounts
 			out[k] = sum
 		}
 	}
-	return out
 }
 
 // sloCounts returns the named SLO's good and total events for the minutes
 // overlapping [from, to].
 func (r *rollups) sloCounts(name string, from, to time.Time) (good, total int64) {
+	first, last := r.minuteRange(from, to)
+	for _, m := range r.members() {
+		g, t := m.ownSLOCounts(name, first, last)
+		good += g
+		total += t
+	}
+	return good, total
+}
+
+func (r *rollups) ownSLOCounts(name string, first, last int64) (good, total int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s := r.slos[name]
 	if s == nil {
 		return 0, 0
 	}
-	first, last := r.minuteRange(from, to)
 	for m := first; m <= last; m++ {
 		if c := s.counts[m]; c != nil {
 			good += c.good
@@ -243,22 +327,36 @@ func (r *rollups) sloCounts(name string, from, to time.Time) (good, total int64)
 }
 
 // coverage is the fraction of the window ending at now that falls after the
-// rollups began collecting — in this process, or in restored history.
+// rollups began collecting — in this process, in restored history, or on
+// another instance.
 func (r *rollups) coverage(now time.Time, window time.Duration) float64 {
 	if window <= 0 {
 		return 1
 	}
-	r.mu.Lock()
-	covered := now.Sub(r.since)
-	r.mu.Unlock()
+	covered := now.Sub(r.dataSince())
 	return math.Max(0, math.Min(1, float64(covered)/float64(window)))
 }
 
-// dataSince is the earliest moment the rollups cover.
+// dataSince is the earliest moment the rollups — this instance's or a
+// peer's — cover.
 func (r *rollups) dataSince() time.Time {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.since
+	since := r.since
+	r.mu.Unlock()
+	r.peersMu.Lock()
+	peers := make([]*rollups, 0, len(r.peers))
+	for _, p := range r.peers {
+		peers = append(peers, p)
+	}
+	r.peersMu.Unlock()
+	for _, p := range peers {
+		p.mu.Lock()
+		if p.since.Before(since) {
+			since = p.since
+		}
+		p.mu.Unlock()
+	}
+	return since
 }
 
 // horizon is how far back any rollup is kept.
@@ -287,10 +385,30 @@ func (r *rollups) cutoffs(now time.Time) (detail, slo int64) {
 	return detail, slo
 }
 
-// prune drops minutes that have aged out of every window that reads them.
+// prune drops minutes that have aged out of every window that reads them,
+// and peers left with nothing.
 func (r *rollups) prune(now time.Time) {
+	r.pruneOwn(now)
+	r.peersMu.Lock()
+	defer r.peersMu.Unlock()
+	for id, p := range r.peers {
+		if p.pruneOwn(now) {
+			delete(r.peers, id)
+		}
+	}
+}
+
+// pruneOwn prunes this instance's own minutes, and reports whether none are
+// left.
+func (r *rollups) pruneOwn(now time.Time) (empty bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	defer func() {
+		empty = len(r.minutes) == 0
+		for _, s := range r.slos {
+			empty = empty && len(s.counts) == 0
+		}
+	}()
 	detailCutoff := minuteOf(now.Add(-r.detail))
 	for m := range r.minutes {
 		if m < detailCutoff {
@@ -305,6 +423,7 @@ func (r *rollups) prune(now time.Time) {
 			}
 		}
 	}
+	return
 }
 
 // reset discards every rollup, as part of a dashboard data reset.
@@ -317,6 +436,11 @@ func (r *rollups) reset(now time.Time) {
 	}
 	r.dirty = make(map[int64]bool)
 	r.since = now
+
+	r.peersMu.Lock()
+	r.peers = nil
+	r.peerWatermark = time.Now().UnixMilli() // don't reload what was just discarded
+	r.peersMu.Unlock()
 }
 
 // --- Persistence ---
@@ -326,8 +450,9 @@ func (r *rollups) reset(now time.Time) {
 // frozen (see STABILITY.md), so optional capabilities are discovered by type
 // assertion.
 type rollupStore interface {
-	saveRollups(minutes []minuteSnapshot) error
-	loadRollups(sinceMinute int64) ([]minuteSnapshot, error)
+	saveRollups(instance string, minutes []minuteSnapshot) error
+	loadRollups(instance string, sinceMinute int64) ([]minuteSnapshot, error)
+	loadPeerRollups(instance string, sinceMinute, updatedAfter int64) (map[string][]minuteSnapshot, int64, error)
 	pruneRollups(detailBefore, sloBefore int64) error
 }
 
@@ -406,32 +531,71 @@ func restoreRollups(p *Pulse) {
 	p.rollups.persist = true
 	p.rollups.mu.Unlock()
 
-	snaps, err := store.loadRollups(minuteOf(p.now().Add(-p.rollups.horizon())))
+	snaps, err := store.loadRollups(p.config.InstanceID, minuteOf(p.now().Add(-p.rollups.horizon())))
 	if err != nil {
 		p.internalError("storage: rollups", err)
 		return
 	}
 	p.rollups.restore(snaps)
+	refreshPeerRollups(p, store)
 }
 
-// flushRollups saves the minutes changed since the last flush (when the
-// backend persists rollups) and drops expired ones.
+// peerRollupOverlap is how far before the last load peer rows are read
+// again, so a save that committed late isn't missed. Reading a minute again
+// replaces it.
+const peerRollupOverlap = time.Minute
+
+// sharedRollupFlushInterval replaces rollupFlushInterval when instances
+// share the storage, so each one's figures include the others' sooner.
+const sharedRollupFlushInterval = 10 * time.Second
+
+// refreshPeerRollups loads the rollups other instances saved since the last
+// load.
+func refreshPeerRollups(p *Pulse, store rollupStore) {
+	r := p.rollups
+	r.peersMu.Lock()
+	after := r.peerWatermark - peerRollupOverlap.Milliseconds()
+	r.peersMu.Unlock()
+
+	byInstance, latest, err := store.loadPeerRollups(p.config.InstanceID, minuteOf(p.now().Add(-r.horizon())), after)
+	if err != nil {
+		p.internalError("storage: rollups", err)
+		return
+	}
+	for id, snaps := range byInstance {
+		r.peer(id).restore(snaps)
+	}
+	r.peersMu.Lock()
+	if latest > r.peerWatermark {
+		r.peerWatermark = latest
+	}
+	r.peersMu.Unlock()
+}
+
+// flushRollups saves the minutes changed since the last flush and loads
+// other instances' (when the backend persists rollups), then drops expired
+// ones.
 func flushRollups(p *Pulse) {
 	now := p.now()
 	if store, ok := p.storage.(rollupStore); ok {
-		p.internalError("storage: rollups", store.saveRollups(p.rollups.takeDirty()))
+		p.internalError("storage: rollups", store.saveRollups(p.config.InstanceID, p.rollups.takeDirty()))
 		p.rollups.mu.Lock()
 		detail, slo := p.rollups.cutoffs(now)
 		p.rollups.mu.Unlock()
 		p.internalError("storage: rollups", store.pruneRollups(detail, slo))
+		refreshPeerRollups(p, store)
 	}
 	p.rollups.prune(now)
 }
 
 // startRollupFlusher flushes rollups on a tick, and once more on shutdown.
 func startRollupFlusher(p *Pulse) {
+	interval := rollupFlushInterval
+	if p.sharedStorage() {
+		interval = sharedRollupFlushInterval
+	}
 	p.startBackground("rollup-flusher", func(ctx context.Context) {
-		ticker := time.NewTicker(rollupFlushInterval)
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {

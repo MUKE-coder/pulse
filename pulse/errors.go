@@ -172,6 +172,7 @@ func newErrorMiddleware(p *Pulse) gin.HandlerFunc {
 // broadcasts it to dashboard clients. Both storage backends store without
 // blocking, so this is safe to call on the request path.
 func (p *Pulse) recordError(r ErrorRecord) {
+	r.InstanceID = p.config.InstanceID
 	p.redactor.finishRecord(&r)
 	p.internalError("storage: errors", p.storage.StoreError(r))
 	p.BroadcastError(r)

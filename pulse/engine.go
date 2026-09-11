@@ -53,6 +53,10 @@ type Pulse struct {
 	logCapture atomic.Bool
 	logTail    logTail
 
+	// leader is set while this instance leads the instances sharing its
+	// storage (see leader.go).
+	leader atomic.Bool
+
 	// GORM plugin
 	gormPlugin *PulsePlugin
 

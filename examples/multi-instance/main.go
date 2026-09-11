@@ -1,13 +1,15 @@
 // Command multi-instance runs one API replica with Pulse, configured the way
 // every replica behind a load balancer should be:
 //
+//   - shared storage (PULSE_DSN, a PostgreSQL connection string), so every
+//     replica's dashboard shows every replica, and one elected replica sends
+//     the alerts about the application;
 //   - one JWT signing key shared by all replicas (PULSE_SECRET), so a
 //     dashboard login works whichever replica serves the next request;
-//   - a per-replica instance ID (INSTANCE_ID, default: the hostname);
-//   - per-replica storage (PULSE_DB). Each replica's dashboard shows only its
-//     own traffic, so the load balancer pins each browser to one replica.
+//   - a per-replica instance ID (INSTANCE_ID, default: the hostname).
 //
-// docker-compose.yml in this directory runs two replicas behind Caddy.
+// docker-compose.yml in this directory runs two replicas and PostgreSQL
+// behind Caddy.
 package main
 
 import (
@@ -22,12 +24,17 @@ import (
 
 	"github.com/MUKE-coder/pulse/pulse"
 	"github.com/gin-gonic/gin"
+	_ "github.com/jackc/pgx/v5/stdlib" // PostgreSQL driver for Pulse's shared storage
 )
 
 func main() {
 	secret := os.Getenv("PULSE_SECRET")
 	if secret == "" {
 		log.Fatal("PULSE_SECRET must be set, to the same value on every replica")
+	}
+	dsn := os.Getenv("PULSE_DSN")
+	if dsn == "" {
+		log.Fatal("PULSE_DSN must be set, to a PostgreSQL database every replica shares")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -39,7 +46,7 @@ func main() {
 		pulse.WithCredentials(os.Getenv("PULSE_USER"), os.Getenv("PULSE_PASSWORD")),
 		pulse.WithSecretKey(secret),
 		pulse.WithInstanceID(os.Getenv("INSTANCE_ID")),
-		pulse.WithSQLite(os.Getenv("PULSE_DB")),
+		pulse.WithPostgres(dsn),
 	)
 
 	router.GET("/api/hello", func(c *gin.Context) {

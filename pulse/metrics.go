@@ -21,6 +21,8 @@ type RequestMetric struct {
 	SpanID       string    `json:"span_id,omitempty"`
 	ParentSpanID string    `json:"parent_span_id,omitempty"`
 	Timestamp    time.Time `json:"timestamp"`
+	// InstanceID is the Pulse instance that served the request.
+	InstanceID string `json:"instance_id,omitempty"`
 }
 
 // QueryMetric captures data about a single database query.
@@ -55,6 +57,8 @@ type RuntimeMetric struct {
 	NumGC         uint32    `json:"num_gc"`
 	GCCPUFraction float64   `json:"gc_cpu_fraction"`
 	Timestamp     time.Time `json:"timestamp"`
+	// InstanceID is the Pulse instance the sample was taken in.
+	InstanceID string `json:"instance_id,omitempty"`
 }
 
 // RequestContext captures relevant context from an HTTP request for error records.
@@ -83,13 +87,15 @@ type ErrorRecord struct {
 	StackTrace     string          `json:"stack_trace,omitempty"`
 	RequestContext *RequestContext `json:"request_context,omitempty"`
 	// TraceID and SpanID identify the request of the latest occurrence.
-	TraceID   string    `json:"trace_id,omitempty"`
-	SpanID    string    `json:"span_id,omitempty"`
-	Count     int64     `json:"count"`
-	FirstSeen time.Time `json:"first_seen"`
-	LastSeen  time.Time `json:"last_seen"`
-	Muted     bool      `json:"muted"`
-	Resolved  bool      `json:"resolved"`
+	TraceID string `json:"trace_id,omitempty"`
+	SpanID  string `json:"span_id,omitempty"`
+	// InstanceID is the Pulse instance of the latest occurrence.
+	InstanceID string    `json:"instance_id,omitempty"`
+	Count      int64     `json:"count"`
+	FirstSeen  time.Time `json:"first_seen"`
+	LastSeen   time.Time `json:"last_seen"`
+	Muted      bool      `json:"muted"`
+	Resolved   bool      `json:"resolved"`
 }
 
 // HealthCheckResult records the outcome of a single health check execution.
@@ -101,6 +107,8 @@ type HealthCheckResult struct {
 	Error     string                 `json:"error,omitempty"`
 	Metadata  map[string]interface{} `json:"metadata,omitempty"`
 	Timestamp time.Time              `json:"timestamp"`
+	// InstanceID is the Pulse instance that ran the check.
+	InstanceID string `json:"instance_id,omitempty"`
 }
 
 // AlertState represents the current lifecycle state of an alert.
@@ -127,6 +135,10 @@ type AlertRecord struct {
 	Message    string     `json:"message"`
 	FiredAt    time.Time  `json:"fired_at"`
 	ResolvedAt *time.Time `json:"resolved_at,omitempty"`
+	// InstanceID is the instance an alert about one instance (its memory,
+	// goroutines, health or storage writes) concerns; empty for alerts about
+	// the whole application.
+	InstanceID string `json:"instance_id,omitempty"`
 }
 
 // DependencyMetric captures data about an outbound HTTP request to a dependency.

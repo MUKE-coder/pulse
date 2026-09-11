@@ -54,6 +54,39 @@ only.
   keeps logs for `RetentionHours`. Exporters receive lines as `EventLog`
   events.
 
+### Added — shared storage for several instances
+
+- PostgreSQL backend: `WithPostgres(dsn)`, or `NewPostgresStorage(db, …)`
+  with `WithStorage`. Several instances of an application record into one
+  database, and every instance's dashboard shows them all. Pulse's tables
+  live in their own schema (`pulse`, or `WithPostgresSchema`). The core
+  module imports no PostgreSQL driver; import pgx or lib/pq.
+- Leader election over a PostgreSQL advisory lock. One instance evaluates
+  the application-wide alert rules and SLO burn rates, sends their
+  notifications and sweeps retention, so N instances send one page, not N.
+  When the leader stops or loses its database session, another instance
+  takes over within seconds and adopts the alerts it left open. Rules
+  about a single instance (memory, goroutines, health, dropped writes) are
+  evaluated by every instance about itself, and their alerts name it.
+- Request counts, error rates, SLOs and test-run comparisons cover every
+  instance: each saves its per-minute rollups and loads the others' every
+  10 s.
+- Requests, runtime samples, health results, errors and alerts record
+  their `InstanceID`. `GET /pulse/api/instances` lists the instances with
+  their status, leadership and traffic; the runtime and health endpoints
+  take `?instance=`. The Overview shows an Instances strip, and the
+  Runtime and Health pages an instance picker.
+- `WithStorage(s)` plugs in any `Storage` implementation.
+- `examples/multi-instance` now runs two replicas on shared PostgreSQL.
+
+### Changed
+
+- SQLite rollup tables are keyed by instance. Databases from earlier
+  versions are migrated when opened, keeping their history.
+- The `high_memory` rule reads this instance's latest runtime sample
+  rather than the newest one in storage, which on shared storage may be
+  another instance's.
+
 ### Fixed — dashboard live updates
 
 - Pages reconnected their WebSocket after every message, because each

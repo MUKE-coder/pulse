@@ -43,6 +43,18 @@ type RuntimeSampler struct {
 	pulse        *Pulse
 	systemInfo   SystemInfo
 	leakDetector *LeakDetector
+
+	mu        sync.Mutex
+	latest    RuntimeMetric // this instance's latest sample
+	hasLatest bool
+}
+
+// latestSample returns this instance's most recent sample. Unlike the
+// storage, it never holds another instance's.
+func (rs *RuntimeSampler) latestSample() (RuntimeMetric, bool) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	return rs.latest, rs.hasLatest
 }
 
 // newRuntimeSampler creates and starts the runtime metrics sampler.
@@ -108,7 +120,11 @@ func (rs *RuntimeSampler) sample() {
 		NumGC:         memStats.NumGC,
 		GCCPUFraction: memStats.GCCPUFraction,
 		Timestamp:     time.Now(),
+		InstanceID:    rs.pulse.config.InstanceID,
 	}
+	rs.mu.Lock()
+	rs.latest, rs.hasLatest = metric, true
+	rs.mu.Unlock()
 
 	// Store (fire-and-forget, don't block sampler)
 	rs.pulse.internalError("storage: runtime", rs.pulse.storage.StoreRuntime(metric))

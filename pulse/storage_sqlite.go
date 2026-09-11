@@ -42,7 +42,8 @@ type SQLiteStorage struct{ *sqlStore }
 type sqlStore struct {
 	db        *sql.DB
 	d         *sqlDialect
-	ownsDB    bool // Close closes db
+	ownsDB    bool          // Close closes db
+	lead      sqlLeadership // see leader.go
 	appName   string
 	startTime time.Time
 	path      string // database file, for size reporting; "" for in-memory
@@ -90,11 +91,21 @@ func openSQLiteStorage(dsn, appName string, queueSize int) (*SQLiteStorage, erro
 		_ = db.Close()
 		return nil, err
 	}
+	// Rollup tables from before v1.2 lack instance_id in their keys: set
+	// them aside so the schema creates the new ones, then copy them over.
+	if err := setAsideLegacyRollups(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if err := initSQLiteSchema(db); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 	if err := migrateSQLiteColumns(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := copyLegacyRollups(db); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -404,13 +415,20 @@ CREATE TABLE IF NOT EXISTS request_rollups (
 	status_4xx INTEGER NOT NULL,
 	status_5xx INTEGER NOT NULL,
 	latency_ns INTEGER NOT NULL,
-	PRIMARY KEY (minute, method, route)
+	instance_id TEXT   NOT NULL DEFAULT '',
+	updated_at INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (instance_id, minute, method, route)
 );
+CREATE INDEX IF NOT EXISTS idx_request_rollups_updated ON request_rollups (updated_at);
 
 CREATE TABLE IF NOT EXISTS latency_rollups (
-	minute INTEGER PRIMARY KEY,
-	hist   BLOB    NOT NULL
+	minute      INTEGER NOT NULL,
+	hist        BLOB    NOT NULL,
+	instance_id TEXT    NOT NULL DEFAULT '',
+	updated_at  INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (instance_id, minute)
 );
+CREATE INDEX IF NOT EXISTS idx_latency_rollups_updated ON latency_rollups (updated_at);
 
 CREATE TABLE IF NOT EXISTS pulse_meta (
 	key   TEXT PRIMARY KEY,
@@ -443,8 +461,11 @@ CREATE TABLE IF NOT EXISTS slo_rollups (
 	slo    TEXT    NOT NULL,
 	good   INTEGER NOT NULL,
 	total  INTEGER NOT NULL,
-	PRIMARY KEY (minute, slo)
+	instance_id TEXT   NOT NULL DEFAULT '',
+	updated_at INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (instance_id, minute, slo)
 );
+CREATE INDEX IF NOT EXISTS idx_slo_rollups_updated ON slo_rollups (updated_at);
 `
 
 func initSQLiteSchema(db *sql.DB) error {
@@ -464,12 +485,17 @@ func initSQLiteSchema(db *sql.DB) error {
 // CREATE TABLE IF NOT EXISTS leaves an existing table alone, so databases
 // created by an earlier version get them through ALTER TABLE at open.
 var sqliteAddedColumns = []struct{ table, column, definition string }{
-	{"requests", "span_id", "TEXT NOT NULL DEFAULT ''"},        // v1.2
-	{"requests", "parent_span_id", "TEXT NOT NULL DEFAULT ''"}, // v1.2
-	{"queries", "span_id", "TEXT NOT NULL DEFAULT ''"},         // v1.2
-	{"queries", "parent_span_id", "TEXT NOT NULL DEFAULT ''"},  // v1.2
-	{"errors", "trace_id", "TEXT NOT NULL DEFAULT ''"},         // v1.2
-	{"errors", "span_id", "TEXT NOT NULL DEFAULT ''"},          // v1.2
+	{"requests", "instance_id", "TEXT NOT NULL DEFAULT ''"},        // v1.2
+	{"runtime_samples", "instance_id", "TEXT NOT NULL DEFAULT ''"}, // v1.2
+	{"errors", "instance_id", "TEXT NOT NULL DEFAULT ''"},          // v1.2
+	{"health_results", "instance_id", "TEXT NOT NULL DEFAULT ''"},  // v1.2
+	{"alerts", "instance_id", "TEXT NOT NULL DEFAULT ''"},          // v1.2
+	{"requests", "span_id", "TEXT NOT NULL DEFAULT ''"},            // v1.2
+	{"requests", "parent_span_id", "TEXT NOT NULL DEFAULT ''"},     // v1.2
+	{"queries", "span_id", "TEXT NOT NULL DEFAULT ''"},             // v1.2
+	{"queries", "parent_span_id", "TEXT NOT NULL DEFAULT ''"},      // v1.2
+	{"errors", "trace_id", "TEXT NOT NULL DEFAULT ''"},             // v1.2
+	{"errors", "span_id", "TEXT NOT NULL DEFAULT ''"},              // v1.2
 }
 
 // migrateSQLiteColumns adds any column in sqliteAddedColumns that the
@@ -485,6 +511,68 @@ func migrateSQLiteColumns(db *sql.DB) error {
 		}
 		if _, err := db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, c.table, c.column, c.definition)); err != nil {
 			return fmt.Errorf("pulse/sqlite: add %s.%s: %w", c.table, c.column, err)
+		}
+	}
+	return nil
+}
+
+// legacyRollupTables are the rollup tables whose primary keys gained
+// instance_id in v1.2, with the columns they had before.
+var legacyRollupTables = []struct{ name, columns string }{
+	{"request_rollups", "minute, method, route, total, status_4xx, status_5xx, latency_ns"},
+	{"latency_rollups", "minute, hist"},
+	{"slo_rollups", "minute, slo, good, total"},
+}
+
+func sqliteHasTable(db *sql.DB, name string) (bool, error) {
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, name).Scan(&n)
+	return n > 0, err
+}
+
+// setAsideLegacyRollups renames rollup tables created before v1.2 to
+// <name>_v11.
+func setAsideLegacyRollups(db *sql.DB) error {
+	for _, t := range legacyRollupTables {
+		exists, err := sqliteHasTable(db, t.name)
+		if err != nil || !exists {
+			if err != nil {
+				return fmt.Errorf("pulse/sqlite: inspect %s: %w", t.name, err)
+			}
+			continue
+		}
+		current, err := sqliteHasColumn(db, t.name, "instance_id")
+		if err != nil {
+			return fmt.Errorf("pulse/sqlite: inspect %s: %w", t.name, err)
+		}
+		if current {
+			continue
+		}
+		if _, err := db.Exec(fmt.Sprintf(`ALTER TABLE %s RENAME TO %s_v11`, t.name, t.name)); err != nil {
+			return fmt.Errorf("pulse/sqlite: set aside %s: %w", t.name, err)
+		}
+	}
+	return nil
+}
+
+// copyLegacyRollups moves the rows of set-aside rollup tables into the
+// current ones — with no instance, so they count as the local instance's —
+// and drops the old tables.
+func copyLegacyRollups(db *sql.DB) error {
+	for _, t := range legacyRollupTables {
+		old := t.name + "_v11"
+		exists, err := sqliteHasTable(db, old)
+		if err != nil {
+			return fmt.Errorf("pulse/sqlite: inspect %s: %w", old, err)
+		}
+		if !exists {
+			continue
+		}
+		if _, err := db.Exec(fmt.Sprintf(`INSERT OR IGNORE INTO %s (%s) SELECT %s FROM %s`, t.name, t.columns, t.columns, old)); err != nil {
+			return fmt.Errorf("pulse/sqlite: copy %s: %w", old, err)
+		}
+		if _, err := db.Exec(`DROP TABLE ` + old); err != nil {
+			return fmt.Errorf("pulse/sqlite: drop %s: %w", old, err)
 		}
 	}
 	return nil
@@ -519,10 +607,10 @@ func firstLine(s string) string {
 
 func (s *sqlStore) StoreRequest(m RequestMetric) error {
 	return s.enqueue(
-		`INSERT INTO requests (timestamp, method, path, status_code, latency_ns, request_size, response_size, client_ip, user_agent, error, trace_id, span_id, parent_span_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO requests (timestamp, method, path, status_code, latency_ns, request_size, response_size, client_ip, user_agent, error, trace_id, span_id, parent_span_id, instance_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.Timestamp.UnixNano(), m.Method, m.Path, m.StatusCode, int64(m.Latency),
-		m.RequestSize, m.ResponseSize, m.ClientIP, m.UserAgent, m.Error, m.TraceID, m.SpanID, m.ParentSpanID,
+		m.RequestSize, m.ResponseSize, m.ClientIP, m.UserAgent, m.Error, m.TraceID, m.SpanID, m.ParentSpanID, m.InstanceID,
 	)
 }
 
@@ -557,7 +645,7 @@ func (s *sqlStore) GetRequests(f RequestFilter) ([]RequestMetric, error) {
 		args = append(args, int64(f.MinLatency))
 	}
 
-	q := `SELECT timestamp, method, path, status_code, latency_ns, request_size, response_size, client_ip, user_agent, error, trace_id, span_id, parent_span_id FROM requests`
+	q := `SELECT timestamp, method, path, status_code, latency_ns, request_size, response_size, client_ip, user_agent, error, trace_id, span_id, parent_span_id, instance_id FROM requests`
 	if len(clauses) > 0 {
 		q += " WHERE " + strings.Join(clauses, " AND ")
 	}
@@ -584,7 +672,7 @@ func (s *sqlStore) GetRequests(f RequestFilter) ([]RequestMetric, error) {
 			respSize int64
 		)
 		if err := rows.Scan(&ts, &m.Method, &m.Path, &m.StatusCode, &lat,
-			&reqSize, &respSize, &m.ClientIP, &m.UserAgent, &m.Error, &m.TraceID, &m.SpanID, &m.ParentSpanID); err != nil {
+			&reqSize, &respSize, &m.ClientIP, &m.UserAgent, &m.Error, &m.TraceID, &m.SpanID, &m.ParentSpanID, &m.InstanceID); err != nil {
 			return nil, err
 		}
 		m.Timestamp = time.Unix(0, ts)
@@ -776,17 +864,17 @@ func (s *sqlStore) GetConnectionPoolStats() (*PoolStats, error) {
 
 func (s *sqlStore) StoreRuntime(m RuntimeMetric) error {
 	return s.enqueue(
-		`INSERT INTO runtime_samples (timestamp, heap_alloc, heap_in_use, heap_objects, stack_in_use, total_alloc, sys, num_goroutine, gc_pause_ns, num_gc, gc_cpu_fraction)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO runtime_samples (timestamp, heap_alloc, heap_in_use, heap_objects, stack_in_use, total_alloc, sys, num_goroutine, gc_pause_ns, num_gc, gc_cpu_fraction, instance_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.Timestamp.UnixNano(), m.HeapAlloc, m.HeapInUse, m.HeapObjects, m.StackInUse,
-		m.TotalAlloc, m.Sys, m.NumGoroutine, m.GCPauseNs, m.NumGC, m.GCCPUFraction,
+		m.TotalAlloc, m.Sys, m.NumGoroutine, m.GCPauseNs, m.NumGC, m.GCCPUFraction, m.InstanceID,
 	)
 }
 
 func (s *sqlStore) GetRuntimeHistory(tr TimeRange) ([]RuntimeMetric, error) {
 	s.sync()
 	rows, err := s.query(
-		`SELECT timestamp, heap_alloc, heap_in_use, heap_objects, stack_in_use, total_alloc, sys, num_goroutine, gc_pause_ns, num_gc, gc_cpu_fraction
+		`SELECT timestamp, heap_alloc, heap_in_use, heap_objects, stack_in_use, total_alloc, sys, num_goroutine, gc_pause_ns, num_gc, gc_cpu_fraction, instance_id
 		 FROM runtime_samples
 		 WHERE timestamp BETWEEN ? AND ?
 		 ORDER BY timestamp ASC`,
@@ -803,7 +891,7 @@ func (s *sqlStore) GetRuntimeHistory(tr TimeRange) ([]RuntimeMetric, error) {
 			m  RuntimeMetric
 		)
 		if err := rows.Scan(&ts, &m.HeapAlloc, &m.HeapInUse, &m.HeapObjects, &m.StackInUse,
-			&m.TotalAlloc, &m.Sys, &m.NumGoroutine, &m.GCPauseNs, &m.NumGC, &m.GCCPUFraction); err != nil {
+			&m.TotalAlloc, &m.Sys, &m.NumGoroutine, &m.GCPauseNs, &m.NumGC, &m.GCCPUFraction, &m.InstanceID); err != nil {
 			return nil, err
 		}
 		m.Timestamp = time.Unix(0, ts)
@@ -819,19 +907,20 @@ func (s *sqlStore) StoreError(e ErrorRecord) error {
 
 	// UPSERT by fingerprint: increment count + bump last_seen on duplicate.
 	return s.enqueue(
-		`INSERT INTO errors AS cur (fingerprint, id, method, route, error_message, error_type, stack_trace, request_ctx, count, first_seen, last_seen, muted, resolved, trace_id, span_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+		`INSERT INTO errors AS cur (fingerprint, id, method, route, error_message, error_type, stack_trace, request_ctx, count, first_seen, last_seen, muted, resolved, trace_id, span_id, instance_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
 		 ON CONFLICT (fingerprint) DO UPDATE SET
 		     count       = cur.count + 1,
 		     last_seen   = excluded.last_seen,
 		     stack_trace = CASE WHEN excluded.stack_trace <> '' THEN excluded.stack_trace ELSE cur.stack_trace END,
 		     request_ctx = CASE WHEN excluded.request_ctx <> '' THEN excluded.request_ctx ELSE cur.request_ctx END,
 		     trace_id    = CASE WHEN excluded.trace_id <> '' THEN excluded.trace_id ELSE cur.trace_id END,
-		     span_id     = CASE WHEN excluded.trace_id <> '' THEN excluded.span_id ELSE cur.span_id END
+		     span_id     = CASE WHEN excluded.trace_id <> '' THEN excluded.span_id ELSE cur.span_id END,
+		     instance_id = CASE WHEN excluded.instance_id <> '' THEN excluded.instance_id ELSE cur.instance_id END
 		`,
 		e.Fingerprint, e.ID, e.Method, e.Route, e.ErrorMessage, e.ErrorType,
 		e.StackTrace, string(ctxJSON), e.Count, e.FirstSeen.UnixNano(), e.LastSeen.UnixNano(),
-		e.TraceID, e.SpanID,
+		e.TraceID, e.SpanID, e.InstanceID,
 	)
 }
 
@@ -866,7 +955,7 @@ func (s *sqlStore) GetErrors(f ErrorFilter) ([]ErrorRecord, error) {
 		args = append(args, boolToInt(*f.Resolved))
 	}
 
-	q := `SELECT fingerprint, id, method, route, error_message, error_type, stack_trace, request_ctx, count, first_seen, last_seen, muted, resolved, trace_id, span_id FROM errors`
+	q := `SELECT fingerprint, id, method, route, error_message, error_type, stack_trace, request_ctx, count, first_seen, last_seen, muted, resolved, trace_id, span_id, instance_id FROM errors`
 	if len(clauses) > 0 {
 		q += " WHERE " + strings.Join(clauses, " AND ")
 	}
@@ -921,7 +1010,7 @@ func (s *sqlStore) GetErrorGroups(tr TimeRange) ([]ErrorGroup, error) {
 func (s *sqlStore) GetErrorByID(id string) (*ErrorRecord, error) {
 	s.sync()
 	row := s.queryRow(
-		`SELECT fingerprint, id, method, route, error_message, error_type, stack_trace, request_ctx, count, first_seen, last_seen, muted, resolved, trace_id, span_id FROM errors WHERE id = ?`,
+		`SELECT fingerprint, id, method, route, error_message, error_type, stack_trace, request_ctx, count, first_seen, last_seen, muted, resolved, trace_id, span_id, instance_id FROM errors WHERE id = ?`,
 		id,
 	)
 	e, err := scanErrorRow(row)
@@ -996,7 +1085,7 @@ func scanErrorRow(r rowScanner) (ErrorRecord, error) {
 		e           ErrorRecord
 	)
 	if err := r.Scan(&e.Fingerprint, &e.ID, &e.Method, &e.Route, &e.ErrorMessage, &e.ErrorType,
-		&e.StackTrace, &ctxJSON, &e.Count, &first, &last, &muted, &resv, &e.TraceID, &e.SpanID); err != nil {
+		&e.StackTrace, &ctxJSON, &e.Count, &first, &last, &muted, &resv, &e.TraceID, &e.SpanID, &e.InstanceID); err != nil {
 		return e, err
 	}
 	e.FirstSeen = time.Unix(0, first)
@@ -1017,15 +1106,15 @@ func scanErrorRow(r rowScanner) (ErrorRecord, error) {
 func (s *sqlStore) StoreHealthResult(r HealthCheckResult) error {
 	meta, _ := json.Marshal(r.Metadata)
 	return s.enqueue(
-		`INSERT INTO health_results (timestamp, name, type, status, latency_ns, error, metadata)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		r.Timestamp.UnixNano(), r.Name, r.Type, r.Status, int64(r.Latency), r.Error, string(meta),
+		`INSERT INTO health_results (timestamp, name, type, status, latency_ns, error, metadata, instance_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.Timestamp.UnixNano(), r.Name, r.Type, r.Status, int64(r.Latency), r.Error, string(meta), r.InstanceID,
 	)
 }
 
 func (s *sqlStore) GetHealthHistory(name string, limit int) ([]HealthCheckResult, error) {
 	s.sync()
-	q := `SELECT timestamp, name, type, status, latency_ns, error, metadata
+	q := `SELECT timestamp, name, type, status, latency_ns, error, metadata, instance_id
 	      FROM health_results WHERE name = ? ORDER BY timestamp DESC`
 	args := []any{name}
 	if limit > 0 {
@@ -1044,7 +1133,7 @@ func (s *sqlStore) GetHealthHistory(name string, limit int) ([]HealthCheckResult
 			ts, lat int64
 			meta    string
 		)
-		if err := rows.Scan(&ts, &r.Name, &r.Type, &r.Status, &lat, &r.Error, &meta); err != nil {
+		if err := rows.Scan(&ts, &r.Name, &r.Type, &r.Status, &lat, &r.Error, &meta, &r.InstanceID); err != nil {
 			return nil, err
 		}
 		r.Timestamp = time.Unix(0, ts)
@@ -1060,7 +1149,7 @@ func (s *sqlStore) GetHealthHistory(name string, limit int) ([]HealthCheckResult
 func (s *sqlStore) GetLatestHealthResults() map[string]HealthCheckResult {
 	s.sync()
 	rows, err := s.query(
-		`SELECT h.timestamp, h.name, h.type, h.status, h.latency_ns, h.error, h.metadata
+		`SELECT h.timestamp, h.name, h.type, h.status, h.latency_ns, h.error, h.metadata, h.instance_id
 		 FROM health_results h
 		 INNER JOIN (
 		   SELECT name, MAX(timestamp) AS ts FROM health_results GROUP BY name
@@ -1077,7 +1166,7 @@ func (s *sqlStore) GetLatestHealthResults() map[string]HealthCheckResult {
 			ts, lat int64
 			meta    string
 		)
-		if err := rows.Scan(&ts, &r.Name, &r.Type, &r.Status, &lat, &r.Error, &meta); err != nil {
+		if err := rows.Scan(&ts, &r.Name, &r.Type, &r.Status, &lat, &r.Error, &meta, &r.InstanceID); err != nil {
 			continue
 		}
 		r.Timestamp = time.Unix(0, ts)
@@ -1100,15 +1189,15 @@ func (s *sqlStore) StoreAlert(a AlertRecord) error {
 		resolvedAt = a.ResolvedAt.UnixNano()
 	}
 	_, err := s.exec(
-		`INSERT INTO alerts (id, rule_name, metric, value, threshold, operator, severity, state, route, message, fired_at, resolved_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO alerts (id, rule_name, metric, value, threshold, operator, severity, state, route, message, fired_at, resolved_at, instance_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT (id) DO UPDATE SET
 		     rule_name = excluded.rule_name, metric = excluded.metric, value = excluded.value,
 		     threshold = excluded.threshold, operator = excluded.operator, severity = excluded.severity,
 		     state = excluded.state, route = excluded.route, message = excluded.message,
-		     fired_at = excluded.fired_at, resolved_at = excluded.resolved_at`,
+		     fired_at = excluded.fired_at, resolved_at = excluded.resolved_at, instance_id = excluded.instance_id`,
 		a.ID, a.RuleName, a.Metric, a.Value, a.Threshold, a.Operator, a.Severity,
-		string(a.State), a.Route, a.Message, a.FiredAt.UnixNano(), resolvedAt,
+		string(a.State), a.Route, a.Message, a.FiredAt.UnixNano(), resolvedAt, a.InstanceID,
 	)
 	return err
 }
@@ -1134,7 +1223,7 @@ func (s *sqlStore) GetAlerts(f AlertFilter) ([]AlertRecord, error) {
 		clauses = append(clauses, "severity = ?")
 		args = append(args, f.Severity)
 	}
-	q := `SELECT id, rule_name, metric, value, threshold, operator, severity, state, route, message, fired_at, resolved_at FROM alerts`
+	q := `SELECT id, rule_name, metric, value, threshold, operator, severity, state, route, message, fired_at, resolved_at, instance_id FROM alerts`
 	if len(clauses) > 0 {
 		q += " WHERE " + strings.Join(clauses, " AND ")
 	}
@@ -1156,7 +1245,7 @@ func (s *sqlStore) GetAlerts(f AlertFilter) ([]AlertRecord, error) {
 			stateStr string
 		)
 		if err := rows.Scan(&a.ID, &a.RuleName, &a.Metric, &a.Value, &a.Threshold, &a.Operator,
-			&a.Severity, &stateStr, &a.Route, &a.Message, &fired, &resolved); err != nil {
+			&a.Severity, &stateStr, &a.Route, &a.Message, &fired, &resolved, &a.InstanceID); err != nil {
 			return nil, err
 		}
 		a.State = AlertState(stateStr)
@@ -1460,6 +1549,7 @@ func (s *sqlStore) ping(ctx context.Context) error {
 // Close commits every queued write, stops the writer, and closes the
 // database. Store calls after Close return errSQLiteClosed.
 func (s *sqlStore) Close() error {
+	s.resign()
 	s.queueMu.Lock()
 	if !s.closed {
 		s.closed = true

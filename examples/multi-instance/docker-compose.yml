@@ -1,4 +1,4 @@
-# Two API replicas behind Caddy.
+# Two API replicas and PostgreSQL behind Caddy.
 #
 #   PULSE_SECRET=$(openssl rand -hex 32) PULSE_PASSWORD=change-me docker compose up --build
 #
@@ -6,9 +6,11 @@
 # accepts the same dashboard token because they share PULSE_SECRET.
 # `curl localhost:8080/api/hello` alternates between api1 and api2.
 #
-# Each replica keeps its own SQLite file, so each dashboard shows only that
-# replica's traffic; Caddy pins each browser's dashboard session to one
-# replica. A shared storage backend is planned for Pulse v1.2.
+# Both replicas record into the same PostgreSQL database, so whichever one
+# serves the dashboard shows both: the Overview lists api1 and api2 with
+# their traffic, and one of them — the leader — sends the alerts about the
+# application. Stop the leader (`docker compose stop api1`) and the other
+# takes over within seconds.
 
 x-api: &api
   build:
@@ -18,22 +20,35 @@ x-api: &api
     PULSE_SECRET: ${PULSE_SECRET:?set PULSE_SECRET to one random value shared by every replica}
     PULSE_USER: admin
     PULSE_PASSWORD: ${PULSE_PASSWORD:?set PULSE_PASSWORD}
-    PULSE_DB: /data/pulse.db
+    PULSE_DSN: postgres://pulse:pulse@postgres:5432/pulse?sslmode=disable
+  depends_on:
+    postgres:
+      condition: service_healthy
 
 services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: pulse
+      POSTGRES_PASSWORD: pulse
+      POSTGRES_DB: pulse
+    volumes: ["pulse-db:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "pulse"]
+      interval: 2s
+      retries: 20
+
   api1:
     <<: *api
     environment:
       <<: *api-env
       INSTANCE_ID: api1
-    volumes: ["api1-data:/data"]
 
   api2:
     <<: *api
     environment:
       <<: *api-env
       INSTANCE_ID: api2
-    volumes: ["api2-data:/data"]
 
   caddy:
     image: caddy:2
@@ -42,5 +57,4 @@ services:
     depends_on: [api1, api2]
 
 volumes:
-  api1-data: {}
-  api2-data: {}
+  pulse-db: {}

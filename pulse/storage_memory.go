@@ -387,6 +387,9 @@ func (s *MemoryStorage) StoreError(e ErrorRecord) error {
 		if e.TraceID != "" {
 			existing.TraceID, existing.SpanID = e.TraceID, e.SpanID
 		}
+		if e.InstanceID != "" {
+			existing.InstanceID = e.InstanceID
+		}
 	} else {
 		cp := e
 		s.errors[e.Fingerprint] = &cp

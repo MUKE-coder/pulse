@@ -143,12 +143,13 @@ func (hr *HealthRunner) runCheck(check HealthCheck) HealthCheckResult {
 	}
 
 	result := HealthCheckResult{
-		Name:      check.Name,
-		Type:      check.Type,
-		Status:    status,
-		Latency:   latency,
-		Error:     errMsg,
-		Timestamp: time.Now(),
+		Name:       check.Name,
+		Type:       check.Type,
+		Status:     status,
+		Latency:    latency,
+		Error:      errMsg,
+		Timestamp:  time.Now(),
+		InstanceID: hr.pulse.config.InstanceID,
 	}
 	if hr.pulse.ctx.Err() != nil {
 		return result // shutting down: the check was cut short, not failed
@@ -417,5 +418,39 @@ func buildHealthResponse(p *Pulse) HealthResponse {
 	}
 	resp.Status = compositeFrom(checks, results)
 
+	return resp
+}
+
+// buildPeerHealthResponse builds the health of another instance sharing
+// this storage from the results it stored, judged by this instance's checks
+// (instances of one application register the same ones).
+func buildPeerHealthResponse(p *Pulse, instance string) HealthResponse {
+	resp := HealthResponse{Timestamp: time.Now(), Checks: make(map[string]HealthCheckResponse)}
+
+	p.healthMu.RLock()
+	checks := append([]HealthCheck(nil), p.healthChecks...)
+	p.healthMu.RUnlock()
+
+	results := map[string]HealthCheckResult{}
+	for _, check := range checks {
+		history, _ := p.storage.GetHealthHistory(check.Name, 50) // newest first
+		for _, r := range history {
+			if r.InstanceID == instance {
+				results[check.Name] = r
+				break
+			}
+		}
+		result, ok := results[check.Name]
+		if !ok {
+			resp.Checks[check.Name] = HealthCheckResponse{Status: "unknown"}
+			continue
+		}
+		resp.Checks[check.Name] = HealthCheckResponse{
+			Status:    result.Status,
+			LatencyMs: float64(result.Latency) / float64(time.Millisecond),
+			Error:     result.Error,
+		}
+	}
+	resp.Status = compositeFrom(checks, results)
 	return resp
 }

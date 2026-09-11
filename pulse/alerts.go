@@ -68,6 +68,34 @@ type ruleState struct {
 	firedValue   float64   // metric value when the open alert fired
 }
 
+// instanceMetrics are measured on each instance separately. Every instance
+// evaluates the rules on them about itself; rules on any other metric
+// describe the whole application and, when instances share storage, are
+// evaluated only by the leader (see leader.go).
+var instanceMetrics = map[string]bool{
+	"heap_alloc_mb": true, "goroutine_growth": true, "storage_dropped_writes": true, "health_status": true,
+}
+
+// alertInstance is the InstanceID an alert on rule carries: this instance's
+// for rules about an instance, none for rules about the application.
+func (ae *AlertEngine) alertInstance(rule AlertRule) string {
+	if instanceMetrics[rule.Metric] {
+		return ae.pulse.config.InstanceID
+	}
+	return ""
+}
+
+// ownsAlert reports whether open alert a is this instance's to track for
+// rule: application-wide alerts have no instance; an instance's alerts
+// carry its ID — or none, when stored before v1.2 on storage no other
+// instance shares.
+func (ae *AlertEngine) ownsAlert(rule AlertRule, a AlertRecord) bool {
+	if want := ae.alertInstance(rule); a.InstanceID != want {
+		return a.InstanceID == "" && want != "" && !ae.pulse.sharedStorage()
+	}
+	return true
+}
+
 // Built-in default alert rules.
 var defaultAlertRules = []AlertRule{
 	{
@@ -215,9 +243,34 @@ func (ae *AlertEngine) restoreFiring() {
 	if err != nil {
 		return
 	}
+	ae.applyOpen(open, func(AlertRule) bool { return true })
+}
+
+// adoptOpenAlerts re-reads the open alerts of application-wide rules when
+// this instance becomes the leader: the previous leader may have fired or
+// resolved some since this instance last looked.
+func (ae *AlertEngine) adoptOpenAlerts() {
+	open, err := ae.pulse.storage.GetAlerts(AlertFilter{State: AlertStateFiring})
+	if err != nil {
+		return
+	}
+	clusterWide := func(r AlertRule) bool { return !instanceMetrics[r.Metric] }
+	ae.mu.Lock()
+	defer ae.mu.Unlock()
+	for _, rs := range ae.ruleStates {
+		if clusterWide(rs.rule) {
+			rs.state, rs.alertID, rs.pendingSince = AlertStateOK, "", time.Time{}
+		}
+	}
+	ae.applyOpen(open, clusterWide)
+}
+
+// applyOpen marks the rules selected by include as firing where open holds
+// an alert of theirs.
+func (ae *AlertEngine) applyOpen(open []AlertRecord, include func(AlertRule) bool) {
 	for _, a := range open { // newest first
 		rs, ok := ae.ruleStates[a.RuleName]
-		if !ok || rs.state == AlertStateFiring {
+		if !ok || !include(rs.rule) || !ae.ownsAlert(rs.rule, a) || rs.state == AlertStateFiring {
 			continue
 		}
 		rs.state = AlertStateFiring
@@ -233,8 +286,12 @@ func (ae *AlertEngine) evaluate() {
 	defer ae.mu.Unlock()
 
 	now := time.Now()
+	leader := ae.pulse.isLeader()
 
 	for _, rs := range ae.ruleStates {
+		if !leader && !instanceMetrics[rs.rule.Metric] {
+			continue // the leader evaluates application-wide rules
+		}
 		value, ok := ae.getMetricValue(rs.rule)
 		if !ok {
 			continue
@@ -324,11 +381,15 @@ func (ae *AlertEngine) getMetricValue(rule AlertRule) (float64, bool) {
 		return overview.ErrorRate, true
 
 	case "heap_alloc_mb":
-		runtimeHistory, _ := ae.pulse.storage.GetRuntimeHistory(Last5m())
-		if len(runtimeHistory) == 0 {
+		// From the sampler, not storage: shared storage holds every
+		// instance's samples.
+		if ae.pulse.runtimeSampler == nil {
 			return 0, false
 		}
-		latest := runtimeHistory[len(runtimeHistory)-1]
+		latest, ok := ae.pulse.runtimeSampler.latestSample()
+		if !ok {
+			return 0, false
+		}
 		return float64(latest.HeapAlloc) / (1024 * 1024), true
 
 	case "goroutine_growth":
@@ -405,17 +466,21 @@ func (ae *AlertEngine) fireAlert(rs *ruleState, value float64) {
 	rs.firedValue = value
 
 	alert := AlertRecord{
-		ID:        alertID,
-		RuleName:  rs.rule.Name,
-		Metric:    rs.rule.Metric,
-		Value:     value,
-		Threshold: rs.rule.Threshold,
-		Operator:  rs.rule.Operator,
-		Severity:  rs.rule.Severity,
-		State:     AlertStateFiring,
-		Route:     rs.rule.Route,
-		Message:   formatAlertMessage(rs.rule, value),
-		FiredAt:   time.Now(),
+		ID:         alertID,
+		RuleName:   rs.rule.Name,
+		Metric:     rs.rule.Metric,
+		Value:      value,
+		Threshold:  rs.rule.Threshold,
+		Operator:   rs.rule.Operator,
+		Severity:   rs.rule.Severity,
+		State:      AlertStateFiring,
+		Route:      rs.rule.Route,
+		Message:    formatAlertMessage(rs.rule, value),
+		FiredAt:    time.Now(),
+		InstanceID: ae.alertInstance(rs.rule),
+	}
+	if alert.InstanceID != "" && ae.pulse.sharedStorage() {
+		alert.Message += fmt.Sprintf(" [instance: %s]", alert.InstanceID)
 	}
 
 	if rs.rule.Metric == "retention_coverage" {
@@ -458,6 +523,10 @@ func (ae *AlertEngine) resolveAlert(rs *ruleState) {
 		Message:    fmt.Sprintf("[Resolved] %s has returned to normal", rs.rule.Name),
 		FiredAt:    rs.lastFired,
 		ResolvedAt: &now,
+		InstanceID: ae.alertInstance(rs.rule),
+	}
+	if alert.InstanceID != "" && ae.pulse.sharedStorage() {
+		alert.Message += fmt.Sprintf(" [instance: %s]", alert.InstanceID)
 	}
 
 	ae.pulse.internalError("storage: alerts", ae.pulse.storage.StoreAlert(alert))

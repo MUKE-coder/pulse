@@ -172,6 +172,7 @@ func newTracingMiddleware(p *Pulse) gin.HandlerFunc {
 			SpanID:       spanID,
 			ParentSpanID: parentSpanID,
 			Timestamp:    start,
+			InstanceID:   p.config.InstanceID,
 		}
 
 		exported := metric

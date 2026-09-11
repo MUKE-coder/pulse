@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useAPI } from '../hooks/useAPI'
 import { useWebSocket } from '../hooks/useWebSocket'
+import { useInstances } from '../hooks/useInstances'
 import StatCard from '../components/StatCard'
 import DataTable from '../components/DataTable'
 import StatusBadge from '../components/StatusBadge'
@@ -48,12 +49,57 @@ function TimelineChart({ title, data, color, gradientId, overlays }) {
   )
 }
 
+const tagStyle = (color) => ({
+  fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 9999,
+  color, background: `${color}18`, border: `1px solid ${color}30`, whiteSpace: 'nowrap',
+})
+
+const statusColor = { running: '#22c55e', stopped: '#64748b' }
+
+// InstancesStrip shows each instance sharing the storage, with its own
+// traffic; the figures elsewhere on the page cover them all.
+function InstancesStrip({ data }) {
+  if (!data.shared && (data.instances || []).length < 2) return null
+  return (
+    <div style={{ marginBottom: 20 }}>
+      <h3 style={{ fontSize: 14, fontWeight: 600, color: '#e2e8f0', marginBottom: 10 }}>Instances</h3>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(230px, 1fr))', gap: 10 }}>
+        {data.instances.map((i) => (
+          <div key={i.id} style={{
+            background: '#111118', border: '1px solid #1e1e2e', borderRadius: 8, padding: 12,
+            borderLeft: `3px solid ${statusColor[i.status] || '#f59e0b'}`,
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6 }}>
+              <span style={{
+                fontWeight: 600, color: '#e2e8f0', fontSize: 13,
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}>{i.id}</span>
+              <span style={{ display: 'flex', gap: 4 }}>
+                {i.leader && <span style={tagStyle('#818cf8')}>leader</span>}
+                {i.self && <span style={tagStyle('#94a3b8')}>this one</span>}
+              </span>
+            </div>
+            <div style={{ fontSize: 12, color: '#64748b', marginTop: 6 }}>
+              {i.status} · {(i.rpm || 0).toFixed(1)} rpm ·{' '}
+              <span style={{ color: i.error_rate > 5 ? '#ef4444' : '#94a3b8' }}>{(i.error_rate || 0).toFixed(1)}% errors</span>
+            </div>
+          </div>
+        ))}
+      </div>
+      <p style={{ fontSize: 12, color: '#64748b', marginTop: 6 }}>
+        Totals and charts cover every instance. The leader evaluates application-wide alerts and SLOs for all of them.
+      </p>
+    </div>
+  )
+}
+
 export default function Dashboard() {
   const { get } = useAPI()
   const [overview, setOverview] = useState(null)
   const [loading, setLoading] = useState(true)
   const { lastMessage } = useWebSocket(['overview'])
   const overlays = useTimelineOverlays(RANGE)
+  const cluster = useInstances()
 
   const fetchData = async () => {
     try {
@@ -124,6 +170,8 @@ export default function Dashboard() {
         <StatCard label="Avg Latency" value={o.avg_latency ? fmtDuration(o.avg_latency) : '-'} color="#f59e0b" />
         <StatCard label="Goroutines" value={o.active_goroutines || '0'} sub={`Heap: ${o.heap_alloc_mb?.toFixed(1) || '0'} MB`} color="#22c55e" />
       </div>
+
+      <InstancesStrip data={cluster} />
 
       {/* Charts — test runs appear as shaded bands, restarts as dashed lines */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 20 }}>

@@ -121,14 +121,14 @@ func TestRollups_PersistAndRestore(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		r.observe("GET", "/x", "/x", 200, time.Duration(i+1)*time.Millisecond, start.Add(time.Duration(i)*time.Second))
 	}
-	if err := s.saveRollups(r.takeDirty()); err != nil {
+	if err := s.saveRollups("test", r.takeDirty()); err != nil {
 		t.Fatalf("saveRollups: %v", err)
 	}
 	if dirty := r.takeDirty(); len(dirty) != 0 {
 		t.Fatalf("takeDirty should clear the dirty set, got %d minutes", len(dirty))
 	}
 
-	snaps, err := s.loadRollups(minuteOf(start.Add(-time.Hour)))
+	snaps, err := s.loadRollups("test", minuteOf(start.Add(-time.Hour)))
 	if err != nil {
 		t.Fatalf("loadRollups: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestRollups_PersistAndRestore(t *testing.T) {
 	if err := s.pruneRollups(minuteOf(end), minuteOf(end)); err != nil {
 		t.Fatalf("pruneRollups: %v", err)
 	}
-	if left, _ := s.loadRollups(0); len(left) != 0 {
+	if left, _ := s.loadRollups("test", 0); len(left) != 0 {
 		t.Fatalf("after prune %d minutes remain, want 0", len(left))
 	}
 }
