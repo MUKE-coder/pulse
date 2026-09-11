@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.2.0] — Unreleased
+
+In progress: the v1.2 part of the follow-up plan. API changes are additive
+only.
+
+### Added — span identity and exporters
+
+- Requests, queries and outbound calls record their own span ID and their
+  parent's (`SpanID`, `ParentSpanID`); error records keep the trace and span
+  of their latest occurrence (`TraceID`, `SpanID`). An inbound
+  `traceparent`'s parent-id is now kept as the request's parent span
+  (before, it was discarded), and the `traceparent` on the response carries
+  the request's own span. The span ID Pulse sends a dependency is recorded
+  on the `DependencyMetric`, so the dependency's spans link to it.
+- `Exporter`, `Event` and `WithExporter`: receive every request (whatever
+  the sample rate), query, outbound call and error as it is recorded,
+  already redacted. Events are delivered in batches from a bounded queue,
+  off the request path. When an exporter falls behind, events are dropped
+  and counted as the `export` internal error; a panicking exporter is
+  recovered. `Shutdown` hands queued events over before returning.
+- New module `github.com/MUKE-coder/pulse/otel` (package `pulseotel`): an
+  `Exporter` that sends those records to OpenTelemetry as spans with
+  semantic-convention attributes, keeping Pulse's trace and span IDs. It is
+  a separate module so the core module doesn't depend on the OpenTelemetry
+  SDK, and it needs Go 1.25.
+- SQLite databases created by earlier versions gain the new columns when
+  opened.
+
+---
+
 ## [1.1.0] — Unreleased
 
 Minor release: the v1.1 part of the follow-up plan to the v1.0.0 code

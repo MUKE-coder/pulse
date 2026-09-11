@@ -89,6 +89,9 @@ type Config struct {
 	// DevMode enables verbose logging and more frequent aggregation.
 	DevMode bool
 
+	// Exporters receive Pulse's telemetry as it is recorded. See [Exporter].
+	Exporters []Exporter `json:"-"`
+
 	// InstanceID identifies this process in lifecycle (start/stop) events.
 	// Default: the hostname, which stays the same across restarts, so an
 	// unclean shutdown can be detected at the next start. Set it explicitly

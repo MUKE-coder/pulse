@@ -16,7 +16,11 @@ type RequestMetric struct {
 	UserAgent    string        `json:"user_agent"`
 	Error        string        `json:"error,omitempty"`
 	TraceID      string        `json:"trace_id"`
-	Timestamp    time.Time     `json:"timestamp"`
+	// SpanID is this request's own span; ParentSpanID is the caller's span
+	// from an inbound traceparent header, if there was one.
+	SpanID       string    `json:"span_id,omitempty"`
+	ParentSpanID string    `json:"parent_span_id,omitempty"`
+	Timestamp    time.Time `json:"timestamp"`
 }
 
 // QueryMetric captures data about a single database query.
@@ -31,7 +35,11 @@ type QueryMetric struct {
 	CallerFile     string        `json:"caller_file,omitempty"`
 	CallerLine     int           `json:"caller_line,omitempty"`
 	RequestTraceID string        `json:"request_trace_id,omitempty"`
-	Timestamp      time.Time     `json:"timestamp"`
+	// SpanID is this query's own span; ParentSpanID is the span of the
+	// request it ran in.
+	SpanID       string    `json:"span_id,omitempty"`
+	ParentSpanID string    `json:"parent_span_id,omitempty"`
+	Timestamp    time.Time `json:"timestamp"`
 }
 
 // RuntimeMetric captures a snapshot of Go runtime statistics.
@@ -74,11 +82,14 @@ type ErrorRecord struct {
 	ErrorType      string          `json:"error_type"`
 	StackTrace     string          `json:"stack_trace,omitempty"`
 	RequestContext *RequestContext `json:"request_context,omitempty"`
-	Count          int64           `json:"count"`
-	FirstSeen      time.Time       `json:"first_seen"`
-	LastSeen       time.Time       `json:"last_seen"`
-	Muted          bool            `json:"muted"`
-	Resolved       bool            `json:"resolved"`
+	// TraceID and SpanID identify the request of the latest occurrence.
+	TraceID   string    `json:"trace_id,omitempty"`
+	SpanID    string    `json:"span_id,omitempty"`
+	Count     int64     `json:"count"`
+	FirstSeen time.Time `json:"first_seen"`
+	LastSeen  time.Time `json:"last_seen"`
+	Muted     bool      `json:"muted"`
+	Resolved  bool      `json:"resolved"`
 }
 
 // HealthCheckResult records the outcome of a single health check execution.
@@ -120,9 +131,16 @@ type AlertRecord struct {
 
 // DependencyMetric captures data about an outbound HTTP request to a dependency.
 type DependencyMetric struct {
-	Name         string        `json:"name"`
-	Method       string        `json:"method"`
-	URL          string        `json:"url"`
+	Name   string `json:"name"`
+	Method string `json:"method"`
+	URL    string `json:"url"`
+	// TraceID is the trace of the request that made the call. SpanID is the
+	// span Pulse propagated to the dependency in its traceparent header, so
+	// the dependency's own spans name it as their parent; ParentSpanID is the
+	// calling request's span.
+	TraceID      string        `json:"trace_id,omitempty"`
+	SpanID       string        `json:"span_id,omitempty"`
+	ParentSpanID string        `json:"parent_span_id,omitempty"`
 	StatusCode   int           `json:"status_code"`
 	Latency      time.Duration `json:"latency"`
 	RequestSize  int64         `json:"request_size"`

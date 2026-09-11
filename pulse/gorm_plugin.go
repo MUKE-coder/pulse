@@ -163,11 +163,16 @@ func (p *PulsePlugin) afterCallback(db *gorm.DB) {
 		callerFile, callerLine = findCaller()
 	}
 
-	// Get trace ID and matched route from context
-	var traceID, route string
+	// Get trace ID, parent span and matched route from context
+	var traceID, parentSpanID, route string
 	if db.Statement.Context != nil {
 		traceID = TraceIDFromContext(db.Statement.Context)
+		parentSpanID = spanIDFromContext(db.Statement.Context)
 		route = RouteFromContext(db.Statement.Context)
+	}
+	var spanID string
+	if traceID != "" {
+		spanID = GenerateSpanID()
 	}
 
 	metric := QueryMetric{
@@ -181,10 +186,14 @@ func (p *PulsePlugin) afterCallback(db *gorm.DB) {
 		CallerFile:     callerFile,
 		CallerLine:     callerLine,
 		RequestTraceID: traceID,
+		SpanID:         spanID,
+		ParentSpanID:   parentSpanID,
 		Timestamp:      startTime,
 	}
 
 	p.pulse.internalError("storage: queries", p.pulse.storage.StoreQuery(metric))
+	exported := metric
+	p.pulse.export(Event{Kind: EventQuery, Query: &exported})
 
 	// N+1 detection
 	if boolValue(cfg.DetectN1) && traceID != "" && normalized.Normalized != "" {

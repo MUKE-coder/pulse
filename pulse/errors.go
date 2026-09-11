@@ -99,6 +99,7 @@ func newErrorMiddleware(p *Pulse) gin.HandlerFunc {
 					traceID,
 				)
 
+				record.SpanID = spanIDFromContext(c.Request.Context())
 				p.recordError(record)
 
 				// Abort with 500
@@ -138,6 +139,7 @@ func newErrorMiddleware(p *Pulse) gin.HandlerFunc {
 					traceID,
 				)
 
+				record.SpanID = spanIDFromContext(c.Request.Context())
 				p.recordError(record)
 			}
 		} else if statusCode >= 500 {
@@ -160,6 +162,7 @@ func newErrorMiddleware(p *Pulse) gin.HandlerFunc {
 				traceID,
 			)
 
+			record.SpanID = spanIDFromContext(c.Request.Context())
 			p.recordError(record)
 		}
 	}
@@ -172,6 +175,8 @@ func (p *Pulse) recordError(r ErrorRecord) {
 	p.redactor.finishRecord(&r)
 	p.internalError("storage: errors", p.storage.StoreError(r))
 	p.BroadcastError(r)
+	exported := r
+	p.export(Event{Kind: EventError, Error: &exported})
 }
 
 // buildErrorRecord constructs a complete ErrorRecord with fingerprint and timestamps.
@@ -188,6 +193,7 @@ func buildErrorRecord(method, route, errMsg, errType, stack string, reqCtx *Requ
 		ErrorType:      errType,
 		StackTrace:     stack,
 		RequestContext: reqCtx,
+		TraceID:        traceID,
 		Count:          1,
 		FirstSeen:      now,
 		LastSeen:       now,

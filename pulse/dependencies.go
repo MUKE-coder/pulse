@@ -56,16 +56,20 @@ func (t *instrumentedTransport) RoundTrip(req *http.Request) (*http.Response, er
 	// Propagate the W3C traceparent so dependencies can correlate with this
 	// trace. We only set the header if the request doesn't already carry one
 	// (callers may explicitly want to start a new trace) and we have a
-	// trace ID in the request's context.
-	if req.Header.Get(TraceparentHeader) == "" {
-		if traceID := TraceIDFromContext(req.Context()); traceID != "" {
-			// Clone the request so we don't mutate caller-owned headers.
-			// http.Request.Header is a map; mutating it from RoundTrip is
-			// undefined per the docs.
-			cloned := req.Clone(req.Context())
-			cloned.Header.Set(TraceparentHeader, BuildTraceparent(traceID, GenerateSpanID()))
-			req = cloned
-		}
+	// trace ID in the request's context. The span ID we propagate is this
+	// call's own span, recorded on the metric so exported traces line up
+	// with the dependency's.
+	traceID := TraceIDFromContext(req.Context())
+	parentSpanID := spanIDFromContext(req.Context())
+	var spanID string
+	if traceID != "" && req.Header.Get(TraceparentHeader) == "" {
+		spanID = GenerateSpanID()
+		// Clone the request so we don't mutate caller-owned headers.
+		// http.Request.Header is a map; mutating it from RoundTrip is
+		// undefined per the docs.
+		cloned := req.Clone(req.Context())
+		cloned.Header.Set(TraceparentHeader, BuildTraceparent(traceID, spanID))
+		req = cloned
 	}
 
 	resp, err := t.wrapped.RoundTrip(req)
@@ -73,12 +77,15 @@ func (t *instrumentedTransport) RoundTrip(req *http.Request) (*http.Response, er
 	latency := time.Since(start)
 
 	metric := DependencyMetric{
-		Name:        t.name,
-		Method:      req.Method,
-		URL:         t.pulse.redactor.url(req.URL),
-		Latency:     latency,
-		RequestSize: req.ContentLength,
-		Timestamp:   start,
+		Name:         t.name,
+		Method:       req.Method,
+		URL:          t.pulse.redactor.url(req.URL),
+		TraceID:      traceID,
+		SpanID:       spanID,
+		ParentSpanID: parentSpanID,
+		Latency:      latency,
+		RequestSize:  req.ContentLength,
+		Timestamp:    start,
 	}
 
 	if err != nil {
@@ -89,6 +96,8 @@ func (t *instrumentedTransport) RoundTrip(req *http.Request) (*http.Response, er
 	}
 
 	t.pulse.internalError("storage: dependencies", t.pulse.storage.StoreDependencyMetric(metric))
+	exported := metric
+	t.pulse.export(Event{Kind: EventDependency, Dependency: &exported})
 
 	return resp, err
 }

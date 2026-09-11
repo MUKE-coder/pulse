@@ -32,6 +32,13 @@ func WithPrefix(prefix string) Option {
 	return func(c *Config) { c.Prefix = prefix }
 }
 
+// WithExporter adds an [Exporter] that receives Pulse's telemetry as it is
+// recorded — every request, query, outbound call and error. Multiple calls
+// accumulate.
+func WithExporter(e Exporter) Option {
+	return func(c *Config) { c.Exporters = append(c.Exporters, e) }
+}
+
 // WithInstanceID sets the identifier this process records in lifecycle
 // (start/stop) events. Defaults to the hostname.
 func WithInstanceID(id string) Option {

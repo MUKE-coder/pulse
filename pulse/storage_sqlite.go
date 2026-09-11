@@ -88,6 +88,10 @@ func openSQLiteStorage(dsn, appName string, queueSize int) (*SQLiteStorage, erro
 		_ = db.Close()
 		return nil, err
 	}
+	if err := migrateSQLiteColumns(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 
 	s := &SQLiteStorage{
 		db:         db,
@@ -430,6 +434,54 @@ func initSQLiteSchema(db *sql.DB) error {
 	return nil
 }
 
+// sqliteAddedColumns are columns added to a table after its first release.
+// CREATE TABLE IF NOT EXISTS leaves an existing table alone, so databases
+// created by an earlier version get them through ALTER TABLE at open.
+var sqliteAddedColumns = []struct{ table, column, definition string }{
+	{"requests", "span_id", "TEXT NOT NULL DEFAULT ''"},        // v1.2
+	{"requests", "parent_span_id", "TEXT NOT NULL DEFAULT ''"}, // v1.2
+	{"queries", "span_id", "TEXT NOT NULL DEFAULT ''"},         // v1.2
+	{"queries", "parent_span_id", "TEXT NOT NULL DEFAULT ''"},  // v1.2
+	{"errors", "trace_id", "TEXT NOT NULL DEFAULT ''"},         // v1.2
+	{"errors", "span_id", "TEXT NOT NULL DEFAULT ''"},          // v1.2
+}
+
+// migrateSQLiteColumns adds any column in sqliteAddedColumns that the
+// database lacks.
+func migrateSQLiteColumns(db *sql.DB) error {
+	for _, c := range sqliteAddedColumns {
+		exists, err := sqliteHasColumn(db, c.table, c.column)
+		if err != nil {
+			return fmt.Errorf("pulse/sqlite: inspect %s: %w", c.table, err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, c.table, c.column, c.definition)); err != nil {
+			return fmt.Errorf("pulse/sqlite: add %s.%s: %w", c.table, c.column, err)
+		}
+	}
+	return nil
+}
+
+func sqliteHasColumn(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
 func firstLine(s string) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		return strings.TrimSpace(s[:i])
@@ -441,10 +493,10 @@ func firstLine(s string) string {
 
 func (s *SQLiteStorage) StoreRequest(m RequestMetric) error {
 	return s.enqueue(
-		`INSERT INTO requests (timestamp, method, path, status_code, latency_ns, request_size, response_size, client_ip, user_agent, error, trace_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO requests (timestamp, method, path, status_code, latency_ns, request_size, response_size, client_ip, user_agent, error, trace_id, span_id, parent_span_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.Timestamp.UnixNano(), m.Method, m.Path, m.StatusCode, int64(m.Latency),
-		m.RequestSize, m.ResponseSize, m.ClientIP, m.UserAgent, m.Error, m.TraceID,
+		m.RequestSize, m.ResponseSize, m.ClientIP, m.UserAgent, m.Error, m.TraceID, m.SpanID, m.ParentSpanID,
 	)
 }
 
@@ -479,7 +531,7 @@ func (s *SQLiteStorage) GetRequests(f RequestFilter) ([]RequestMetric, error) {
 		args = append(args, int64(f.MinLatency))
 	}
 
-	q := `SELECT timestamp, method, path, status_code, latency_ns, request_size, response_size, client_ip, user_agent, error, trace_id FROM requests`
+	q := `SELECT timestamp, method, path, status_code, latency_ns, request_size, response_size, client_ip, user_agent, error, trace_id, span_id, parent_span_id FROM requests`
 	if len(clauses) > 0 {
 		q += " WHERE " + strings.Join(clauses, " AND ")
 	}
@@ -506,7 +558,7 @@ func (s *SQLiteStorage) GetRequests(f RequestFilter) ([]RequestMetric, error) {
 			respSize int64
 		)
 		if err := rows.Scan(&ts, &m.Method, &m.Path, &m.StatusCode, &lat,
-			&reqSize, &respSize, &m.ClientIP, &m.UserAgent, &m.Error, &m.TraceID); err != nil {
+			&reqSize, &respSize, &m.ClientIP, &m.UserAgent, &m.Error, &m.TraceID, &m.SpanID, &m.ParentSpanID); err != nil {
 			return nil, err
 		}
 		m.Timestamp = time.Unix(0, ts)
@@ -564,16 +616,16 @@ func (s *SQLiteStorage) GetRouteDetail(method, path string, tr TimeRange) (*Rout
 
 func (s *SQLiteStorage) StoreQuery(m QueryMetric) error {
 	return s.enqueue(
-		`INSERT INTO queries (timestamp, sql_text, normalized_sql, duration_ns, rows_affected, error, operation, table_name, caller_file, caller_line, request_trace_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO queries (timestamp, sql_text, normalized_sql, duration_ns, rows_affected, error, operation, table_name, caller_file, caller_line, request_trace_id, span_id, parent_span_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.Timestamp.UnixNano(), m.SQL, m.NormalizedSQL, int64(m.Duration),
-		m.RowsAffected, m.Error, m.Operation, m.Table, m.CallerFile, m.CallerLine, m.RequestTraceID,
+		m.RowsAffected, m.Error, m.Operation, m.Table, m.CallerFile, m.CallerLine, m.RequestTraceID, m.SpanID, m.ParentSpanID,
 	)
 }
 
 func (s *SQLiteStorage) GetSlowQueries(threshold time.Duration, limit int) ([]QueryMetric, error) {
 	s.sync()
-	q := `SELECT timestamp, sql_text, normalized_sql, duration_ns, rows_affected, error, operation, table_name, caller_file, caller_line, request_trace_id
+	q := `SELECT timestamp, sql_text, normalized_sql, duration_ns, rows_affected, error, operation, table_name, caller_file, caller_line, request_trace_id, span_id, parent_span_id
 	      FROM queries WHERE duration_ns >= ? ORDER BY duration_ns DESC`
 	args := []any{int64(threshold)}
 	if limit > 0 {
@@ -592,7 +644,7 @@ func (s *SQLiteStorage) GetSlowQueries(threshold time.Duration, limit int) ([]Qu
 			m       QueryMetric
 		)
 		if err := rows.Scan(&ts, &m.SQL, &m.NormalizedSQL, &dur, &m.RowsAffected, &m.Error,
-			&m.Operation, &m.Table, &m.CallerFile, &m.CallerLine, &m.RequestTraceID); err != nil {
+			&m.Operation, &m.Table, &m.CallerFile, &m.CallerLine, &m.RequestTraceID, &m.SpanID, &m.ParentSpanID); err != nil {
 			return nil, err
 		}
 		m.Timestamp = time.Unix(0, ts)
@@ -741,16 +793,19 @@ func (s *SQLiteStorage) StoreError(e ErrorRecord) error {
 
 	// UPSERT by fingerprint: increment count + bump last_seen on duplicate.
 	return s.enqueue(
-		`INSERT INTO errors (fingerprint, id, method, route, error_message, error_type, stack_trace, request_ctx, count, first_seen, last_seen, muted, resolved)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+		`INSERT INTO errors (fingerprint, id, method, route, error_message, error_type, stack_trace, request_ctx, count, first_seen, last_seen, muted, resolved, trace_id, span_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
 		 ON CONFLICT (fingerprint) DO UPDATE SET
 		     count       = count + 1,
 		     last_seen   = excluded.last_seen,
 		     stack_trace = CASE WHEN excluded.stack_trace <> '' THEN excluded.stack_trace ELSE errors.stack_trace END,
-		     request_ctx = CASE WHEN excluded.request_ctx <> '' THEN excluded.request_ctx ELSE errors.request_ctx END
+		     request_ctx = CASE WHEN excluded.request_ctx <> '' THEN excluded.request_ctx ELSE errors.request_ctx END,
+		     trace_id    = CASE WHEN excluded.trace_id <> '' THEN excluded.trace_id ELSE errors.trace_id END,
+		     span_id     = CASE WHEN excluded.trace_id <> '' THEN excluded.span_id ELSE errors.span_id END
 		`,
 		e.Fingerprint, e.ID, e.Method, e.Route, e.ErrorMessage, e.ErrorType,
 		e.StackTrace, string(ctxJSON), e.Count, e.FirstSeen.UnixNano(), e.LastSeen.UnixNano(),
+		e.TraceID, e.SpanID,
 	)
 }
 
@@ -785,7 +840,7 @@ func (s *SQLiteStorage) GetErrors(f ErrorFilter) ([]ErrorRecord, error) {
 		args = append(args, boolToInt(*f.Resolved))
 	}
 
-	q := `SELECT fingerprint, id, method, route, error_message, error_type, stack_trace, request_ctx, count, first_seen, last_seen, muted, resolved FROM errors`
+	q := `SELECT fingerprint, id, method, route, error_message, error_type, stack_trace, request_ctx, count, first_seen, last_seen, muted, resolved, trace_id, span_id FROM errors`
 	if len(clauses) > 0 {
 		q += " WHERE " + strings.Join(clauses, " AND ")
 	}
@@ -840,7 +895,7 @@ func (s *SQLiteStorage) GetErrorGroups(tr TimeRange) ([]ErrorGroup, error) {
 func (s *SQLiteStorage) GetErrorByID(id string) (*ErrorRecord, error) {
 	s.sync()
 	row := s.db.QueryRow(
-		`SELECT fingerprint, id, method, route, error_message, error_type, stack_trace, request_ctx, count, first_seen, last_seen, muted, resolved FROM errors WHERE id = ?`,
+		`SELECT fingerprint, id, method, route, error_message, error_type, stack_trace, request_ctx, count, first_seen, last_seen, muted, resolved, trace_id, span_id FROM errors WHERE id = ?`,
 		id,
 	)
 	e, err := scanErrorRow(row)
@@ -915,7 +970,7 @@ func scanErrorRow(r rowScanner) (ErrorRecord, error) {
 		e           ErrorRecord
 	)
 	if err := r.Scan(&e.Fingerprint, &e.ID, &e.Method, &e.Route, &e.ErrorMessage, &e.ErrorType,
-		&e.StackTrace, &ctxJSON, &e.Count, &first, &last, &muted, &resv); err != nil {
+		&e.StackTrace, &ctxJSON, &e.Count, &first, &last, &muted, &resv, &e.TraceID, &e.SpanID); err != nil {
 		return e, err
 	}
 	e.FirstSeen = time.Unix(0, first)

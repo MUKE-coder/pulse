@@ -8,6 +8,7 @@ The **public API** consists of every exported identifier (types, functions, meth
 
 - `github.com/MUKE-coder/pulse/pulse`
 - `github.com/MUKE-coder/pulse/ui` (the `DistFS()` accessor only — embedded asset contents are not part of the API)
+- `github.com/MUKE-coder/pulse/otel` (package `pulseotel`, since v1.2.0). This is a separate Go module, tagged `otel/vX.Y.Z` alongside the core release, so the core module does not depend on the OpenTelemetry SDK. Its minimum Go version follows the OpenTelemetry SDK's.
 
 Every symbol with a leading capital letter in those packages is covered by the stability guarantees below.
 
@@ -40,6 +41,7 @@ If you need stability on something currently out of scope, open an issue describ
 - New exported types, functions, methods, options.
 - New API endpoints.
 - New configuration knobs (with backwards-compatible defaults).
+- New `EventKind` values delivered to an `Exporter`. Exporters must ignore kinds they don't recognise.
 - New deprecation notices.
 - Existing deprecated symbols are **not** removed in a minor release.
 
@@ -103,4 +105,4 @@ fmt.Printf("Pulse SDK %s\n", pulse.Version)
 ---
 
 **Effective from:** `v1.0.0`.
-**Document version:** 1.0.
+**Document version:** 1.1.

@@ -43,6 +43,10 @@ type Pulse struct {
 	// internal counts failures inside Pulse itself (see internal.go).
 	internal internalErrors
 
+	// exporter delivers telemetry to Config.Exporters; nil when there are
+	// none (see exporter.go).
+	exporter *exportPipeline
+
 	// GORM plugin
 	gormPlugin *PulsePlugin
 
@@ -97,6 +101,7 @@ func newPulse(parent context.Context, cfg Config) *Pulse {
 		startTime:    time.Now(),
 		now:          time.Now,
 		redactor:     newRedactor(cfg.Errors.Redaction),
+		exporter:     newExportPipeline(cfg.Exporters),
 		rollups:      newRollups(time.Duration(cfg.Storage.RetentionHours)*time.Hour, cfg.SLOs, time.Now()),
 		healthChecks: make([]HealthCheck, 0),
 		ctx:          ctx,

@@ -112,6 +112,9 @@ func Mount(ctx context.Context, router *gin.Engine, db *gorm.DB, opts ...Option)
 	restoreRollups(p)
 	startRollupFlusher(p)
 
+	// Deliver telemetry to any configured exporters (OpenTelemetry etc.).
+	startExportPipeline(p)
+
 	// Start retention sweeper (drops error/alert/N+1 records older than
 	// Storage.RetentionHours). Ring buffers self-trim, so this is only
 	// useful for the unbounded maps in MemoryStorage.

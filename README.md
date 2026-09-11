@@ -23,6 +23,7 @@ Pulse gives you full visibility into your application's HTTP requests, database 
   - [Health Checks](#health-checks)
   - [Alerting](#alerting)
   - [Prometheus](#prometheus)
+  - [OpenTelemetry and exporters](#opentelemetry-and-exporters)
 - [Dependency Monitoring](#dependency-monitoring)
 - [WebSocket Live Updates](#websocket-live-updates)
 - [Data Export](#data-export)
@@ -680,6 +681,58 @@ Prometheus: pulse.PrometheusConfig{
 | `pulse_storage_dropped_writes_total` | counter | | Writes dropped because the write queue was full |
 | `pulse_internal_errors_total` | counter | component | Failures inside Pulse itself (storage, notifications, …) |
 | `pulse_build_info` | gauge | version, instance_id, storage | Always 1; identifies the Pulse instance |
+
+### OpenTelemetry and exporters
+
+An `Exporter` receives everything Pulse records: every request (whatever `SampleRate` says), query, outbound call and error. Records arrive in batches, already redacted, off the request path:
+
+```go
+type Exporter interface {
+    Export(ctx context.Context, events []pulse.Event)
+}
+
+pulse.Mount(ctx, router, db, pulse.WithExporter(myExporter))
+```
+
+Each record carries `TraceID`, `SpanID` and `ParentSpanID`: the same IDs Pulse reads from and writes to `traceparent` headers. A request, its queries and its outbound calls form one span tree, joined to the caller's trace and to the downstream services'. If an exporter falls behind, events are dropped rather than slowing requests down, and counted in `pulse_internal_errors_total{component="export"}`.
+
+For OpenTelemetry, the `pulseotel` module turns the records into spans with semantic-convention attributes:
+
+```bash
+go get github.com/MUKE-coder/pulse/otel
+```
+
+```go
+import (
+    pulseotel "github.com/MUKE-coder/pulse/otel"
+    "go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+    "go.opentelemetry.io/otel/sdk/resource"
+    sdktrace "go.opentelemetry.io/otel/sdk/trace"
+    semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
+)
+
+otlp, err := otlptracehttp.New(ctx) // honours OTEL_EXPORTER_OTLP_ENDPOINT
+if err != nil {
+    log.Fatal(err)
+}
+exp := pulseotel.New(
+    sdktrace.WithBatcher(otlp),
+    sdktrace.WithResource(resource.NewSchemaless(semconv.ServiceName("orders"))),
+)
+p := pulse.Mount(ctx, router, db, pulse.WithExporter(exp))
+
+// On shutdown: Pulse first (it hands over its last events), then the exporter.
+_ = p.Shutdown()
+_ = exp.Shutdown(context.Background())
+```
+
+| Pulse record | Span | Key attributes |
+|---|---|---|
+| Request | server, `GET /orders/:id` | `http.request.method`, `http.route`, `http.response.status_code`; error status on 5xx |
+| GORM query | client, `SELECT orders` | `db.query.text` (normalized, no literal values), `db.operation.name`, `db.collection.name`, `code.file.path` |
+| Outbound call | client, `GET` | `url.full` (redacted), `server.address`, `service.peer.name`; error status on 4xx/5xx or no response |
+
+`pulseotel` is a separate module, so the core module doesn't pull in the OpenTelemetry SDK. It needs Go 1.25.
 
 ---
 

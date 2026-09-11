@@ -30,6 +30,27 @@ jobs:
       - name: go test (race detector)
         run: go test -race -count=1 ./...
 
+  # The OpenTelemetry exporter is its own module (so the core module doesn't
+  # depend on the OTel SDK), which go vet/test ./... at the root skip.
+  otel:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: otel
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: otel/go.mod
+          cache-dependency-path: otel/go.sum
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test (race detector)
+        run: go test -race -count=1 ./...
+
   dashboard:
     runs-on: ubuntu-latest
     steps:

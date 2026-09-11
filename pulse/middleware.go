@@ -85,24 +85,26 @@ func newTracingMiddleware(p *Pulse) gin.HandlerFunc {
 			return
 		}
 
-		// Honor an incoming W3C traceparent if present and valid; otherwise
-		// generate a fresh trace ID. Either way we emit a traceparent on the
-		// response so downstream services can continue the trace.
+		// Honor an incoming W3C traceparent if present and valid: adopt its
+		// trace ID, and its parent-id becomes this request's parent span.
+		// Otherwise start a new trace. Either way the request gets its own
+		// span ID, which the response's traceparent carries back.
 		var traceID, parentSpanID string
-		if tp, _, ok := ParseTraceparent(c.GetHeader(TraceparentHeader)); ok {
-			traceID = tp
+		if tp, parent, ok := ParseTraceparent(c.GetHeader(TraceparentHeader)); ok {
+			traceID, parentSpanID = tp, parent
 		} else {
 			traceID = GenerateTraceID()
 		}
-		parentSpanID = GenerateSpanID()
+		spanID := GenerateSpanID()
 		c.Header(TraceIDHeader, traceID)
-		c.Header(TraceparentHeader, BuildTraceparent(traceID, parentSpanID))
+		c.Header(TraceparentHeader, BuildTraceparent(traceID, spanID))
 
-		// Attach trace ID and pulse instance to context. The route pattern
-		// is best-effort here — Gin only resolves c.FullPath() *after* it has
-		// matched the route, so the value may be empty for 404s. We refresh
-		// it in the GORM plugin via RouteFromContext when needed.
+		// Attach trace ID, span ID and pulse instance to context. The route
+		// pattern is best-effort here — Gin only resolves c.FullPath() *after*
+		// it has matched the route, so the value may be empty for 404s. We
+		// refresh it in the GORM plugin via RouteFromContext when needed.
 		ctx := ContextWithTraceID(c.Request.Context(), traceID)
+		ctx = contextWithSpanID(ctx, spanID)
 		ctx = ContextWithPulse(ctx, p)
 		ctx = ContextWithRoute(ctx, c.Request.Method+" "+c.FullPath())
 		c.Request = c.Request.WithContext(ctx)
@@ -144,7 +146,8 @@ func newTracingMiddleware(p *Pulse) gin.HandlerFunc {
 		isSlow := latency >= cfg.SlowRequestThreshold
 		shouldRecord := isError || isSlow || shouldSample(float64Value(cfg.SampleRate))
 
-		if !shouldRecord {
+		// Exporters receive every request; sampling only thins out storage.
+		if !shouldRecord && p.exporter == nil {
 			return
 		}
 
@@ -166,7 +169,15 @@ func newTracingMiddleware(p *Pulse) gin.HandlerFunc {
 			UserAgent:    c.Request.UserAgent(),
 			Error:        errMsg,
 			TraceID:      traceID,
+			SpanID:       spanID,
+			ParentSpanID: parentSpanID,
 			Timestamp:    start,
+		}
+
+		exported := metric
+		p.export(Event{Kind: EventRequest, Request: &exported})
+		if !shouldRecord {
+			return
 		}
 
 		// Both backends store without blocking (a ring-buffer push, or a

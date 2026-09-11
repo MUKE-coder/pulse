@@ -24,9 +24,24 @@ const (
 	TraceparentHeader = "traceparent"
 
 	traceIDKey contextKey = "pulse_trace_id"
+	spanIDKey  contextKey = "pulse_span_id"
 	pulseKey   contextKey = "pulse_instance"
 	routeKey   contextKey = "pulse_route"
 )
+
+// contextWithSpanID attaches the current request's span ID, so queries and
+// outbound calls made while handling it can name it as their parent.
+func contextWithSpanID(ctx context.Context, spanID string) context.Context {
+	return context.WithValue(ctx, spanIDKey, spanID)
+}
+
+// spanIDFromContext returns the span ID stashed by contextWithSpanID, or "".
+func spanIDFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(spanIDKey).(string); ok {
+		return v
+	}
+	return ""
+}
 
 // traceID pool to reduce allocations
 var tracePool = sync.Pool{
