@@ -8,10 +8,10 @@ import (
 )
 
 const (
-	defaultRequestCapacity  = 100000
-	defaultQueryCapacity    = 50000
-	defaultRuntimeCapacity  = 10000
-	defaultHealthCapacity   = 1000
+	defaultRequestCapacity    = 100000
+	defaultQueryCapacity      = 50000
+	defaultRuntimeCapacity    = 10000
+	defaultHealthCapacity     = 1000
 	defaultDependencyCapacity = 50000
 )
 
@@ -496,11 +496,21 @@ func (s *MemoryStorage) GetHealthHistory(name string, limit int) ([]HealthCheckR
 
 // --- Alerts ---
 
-// StoreAlert stores an alert record.
+// StoreAlert stores an alert record, replacing any existing record with the
+// same ID. Alerts are resolved by re-storing the firing record with its state
+// updated, matching SQLiteStorage's INSERT OR REPLACE.
 func (s *MemoryStorage) StoreAlert(a AlertRecord) error {
 	s.alertsMu.Lock()
 	defer s.alertsMu.Unlock()
 
+	if a.ID != "" {
+		for i := len(s.alerts) - 1; i >= 0; i-- {
+			if s.alerts[i].ID == a.ID {
+				s.alerts[i] = a
+				return nil
+			}
+		}
+	}
 	s.alerts = append(s.alerts, a)
 	// Cap at 10000
 	if len(s.alerts) > 10000 {
@@ -628,11 +638,21 @@ func (s *MemoryStorage) GetDependencyStats(timeRange TimeRange) ([]DependencySta
 
 // --- Test runs ---
 
-// StoreTestRun stores a single test-run record. The slice is capped to
-// keep memory bounded; the oldest entries are dropped when full.
+// StoreTestRun stores a single test-run record, replacing any existing run
+// with the same ID — harnesses post a run once at start and again at end.
+// The slice is capped to keep memory bounded; the oldest entries are dropped
+// when full.
 func (s *MemoryStorage) StoreTestRun(r TestRun) error {
 	s.testRunsMu.Lock()
 	defer s.testRunsMu.Unlock()
+	if r.ID != "" {
+		for i := range s.testRuns {
+			if s.testRuns[i].ID == r.ID {
+				s.testRuns[i] = r
+				return nil
+			}
+		}
+	}
 	s.testRuns = append(s.testRuns, r)
 	const cap = 1000
 	if len(s.testRuns) > cap {
@@ -958,4 +978,3 @@ func (s *MemoryStorage) GetLatestHealthResults() map[string]HealthCheckResult {
 	}
 	return results
 }
-

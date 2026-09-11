@@ -160,8 +160,15 @@ type sloEvaluator struct {
 	slos  []SLO
 
 	mu     sync.RWMutex
-	status map[string]SLOStatus           // snapshot for /pulse/api/slos
-	firing map[string]map[string]string   // sloName → burnAlertName → alertID
+	status map[string]SLOStatus            // snapshot for /pulse/api/slos
+	firing map[string]map[string]sloFiring // sloName → burnAlertName → open alert
+}
+
+// sloFiring is the open alert record of a burn-rate rule that is firing.
+type sloFiring struct {
+	id       string
+	firedAt  time.Time
+	burnRate float64
 }
 
 func newSLOEvaluator(p *Pulse, slos []SLO) *sloEvaluator {
@@ -178,7 +185,7 @@ func newSLOEvaluator(p *Pulse, slos []SLO) *sloEvaluator {
 		pulse:  p,
 		slos:   prepared,
 		status: make(map[string]SLOStatus, len(prepared)),
-		firing: make(map[string]map[string]string, len(prepared)),
+		firing: make(map[string]map[string]sloFiring, len(prepared)),
 	}
 
 	interval := 30 * time.Second
@@ -337,9 +344,9 @@ func (ev *sloEvaluator) reconcileAlert(
 
 	ev.mu.Lock()
 	if ev.firing[slo.Name] == nil {
-		ev.firing[slo.Name] = make(map[string]string)
+		ev.firing[slo.Name] = make(map[string]sloFiring)
 	}
-	prevAlertID, wasFiring := ev.firing[slo.Name][ba.Name]
+	prev, wasFiring := ev.firing[slo.Name][ba.Name]
 	ev.mu.Unlock()
 
 	switch {
@@ -363,7 +370,7 @@ func (ev *sloEvaluator) reconcileAlert(
 		}
 		ev.storeAndNotify(alert)
 		ev.mu.Lock()
-		ev.firing[slo.Name][ba.Name] = id
+		ev.firing[slo.Name][ba.Name] = sloFiring{id: id, firedAt: now, burnRate: burnRate}
 		ev.mu.Unlock()
 
 	case !firing && wasFiring:
@@ -382,12 +389,13 @@ func (ev *sloEvaluator) reconcileAlert(
 				"SLO %q burn-rate %s resolved: %.1f× target over %s",
 				slo.Name, ba.Name, burnRate, ba.Window,
 			),
-			FiredAt:    now,
+			FiredAt:    prev.firedAt,
 			ResolvedAt: &resolved,
 		}
-		// We preserve the original firing time so the resolved record links
-		// to the same incident.
-		alert.ID = prevAlertID
+		// Close the open record in place: same ID, original firing time and
+		// burn rate, so the incident reads as one record.
+		alert.ID = prev.id
+		alert.Value = prev.burnRate
 		ev.storeAndNotify(alert)
 		ev.mu.Lock()
 		delete(ev.firing[slo.Name], ba.Name)

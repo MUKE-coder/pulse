@@ -133,3 +133,44 @@ func TestRankN1Detections_LimitTrims(t *testing.T) {
 		t.Fatalf("expected the two highest-impact routes (a, b), got (%q, %q)", out[0].Route, out[1].Route)
 	}
 }
+
+// TestRankN1Detections_ReviewScenario seeds three N+1 patterns of very
+// different shapes — as the plugin now records them, with real per-request
+// counts — and checks they rank by total wall-clock cost, the order someone
+// paying for the latency would fix them in:
+//
+//	GET /orders: 100 requests × 50 queries × 2ms  = 10s
+//	GET /users: 1000 requests ×  5 queries × 1ms  =  5s
+//	GET /feed:    10 requests ×  6 queries × 50ms =  3s
+func TestRankN1Detections_ReviewScenario(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	var in []N1Detection
+	add := func(route, pattern string, requests, perRequest int, each time.Duration) {
+		for i := 0; i < requests; i++ {
+			in = append(in, N1Detection{
+				Route: route, Pattern: pattern, Count: perRequest,
+				TotalDuration: time.Duration(perRequest) * each, AvgDuration: each,
+				DetectedAt: now,
+			})
+		}
+	}
+	add("GET /orders", "select * from items where order_id = ?", 100, 50, 2*time.Millisecond)
+	add("GET /feed", "select * from authors where id = ?", 10, 6, 50*time.Millisecond)
+	add("GET /users", "select count(*) from posts where author_id = ?", 1000, 5, time.Millisecond)
+
+	out := rankN1Detections(in, 0)
+	want := []string{"GET /orders", "GET /users", "GET /feed"}
+	if len(out) != len(want) {
+		t.Fatalf("got %d groups, want %d", len(out), len(want))
+	}
+	for i, route := range want {
+		if out[i].Route != route {
+			t.Fatalf("rank %d = %q, want %q (full order: %v)", i, out[i].Route, route, out)
+		}
+	}
+	if out[0].AvgQueriesPerHit != 50 || out[0].TotalDuration != 10*time.Second {
+		t.Errorf("GET /orders = %.0f queries/hit, %s total; want 50 and 10s",
+			out[0].AvgQueriesPerHit, out[0].TotalDuration)
+	}
+}

@@ -71,7 +71,7 @@ export default function TestRuns() {
       {!loading && runs.length === 0 && (
         <div className="bg-slate-900/60 border border-slate-800 rounded-lg p-5 text-sm text-slate-400">
           No test runs recorded in the selected window. Once a k6 (or other) harness POSTs
-          a run, it will appear here and on the timeline charts as a labelled vertical band.
+          a run, it will appear here.
         </div>
       )}
 

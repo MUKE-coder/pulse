@@ -121,6 +121,18 @@ func newTracingMiddleware(p *Pulse) gin.HandlerFunc {
 		latency := time.Since(start)
 		statusCode := rw.statusCode
 
+		// Get the route pattern (e.g., "/users/:id") instead of actual path
+		routePattern := c.FullPath()
+		if routePattern == "" {
+			routePattern = requestPath
+		}
+
+		// The request is done, so its N+1 tallies are final. Record them
+		// whether or not this request is sampled below.
+		if p.gormPlugin != nil {
+			p.gormPlugin.finalizeTrace(traceID, c.Request.Method+" "+routePattern)
+		}
+
 		// Determine if we should record this request (sampling)
 		isError := statusCode >= 400
 		isSlow := latency >= cfg.SlowRequestThreshold
@@ -128,12 +140,6 @@ func newTracingMiddleware(p *Pulse) gin.HandlerFunc {
 
 		if !shouldRecord {
 			return
-		}
-
-		// Get the route pattern (e.g., "/users/:id") instead of actual path
-		routePattern := c.FullPath()
-		if routePattern == "" {
-			routePattern = requestPath
 		}
 
 		// Collect error message from gin errors

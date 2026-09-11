@@ -35,9 +35,9 @@ func WrapHTTPClient(p *Pulse, client *http.Client, name string) *http.Client {
 
 // instrumentedTransport wraps an http.RoundTripper to capture per-request metrics.
 type instrumentedTransport struct {
-	pulse     *Pulse
-	wrapped   http.RoundTripper
-	name      string
+	pulse   *Pulse
+	wrapped http.RoundTripper
+	name    string
 }
 
 // newInstrumentedTransport creates a new instrumented transport.
@@ -75,7 +75,7 @@ func (t *instrumentedTransport) RoundTrip(req *http.Request) (*http.Response, er
 	metric := DependencyMetric{
 		Name:        t.name,
 		Method:      req.Method,
-		URL:         req.URL.String(),
+		URL:         redactURL(req.URL),
 		Latency:     latency,
 		RequestSize: req.ContentLength,
 		Timestamp:   start,

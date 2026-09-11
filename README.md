@@ -256,7 +256,7 @@ Storage: pulse.StorageConfig{
 },
 ```
 
-**Memory backend** — lock-free ring buffers, ~100K request capacity. Fast, allocation-free hot path. Data is lost on restart.
+**Memory backend** — fixed-capacity ring buffers (100K requests, 50K queries). Fast and bounded, but data is lost on restart. Under sustained traffic the buffer, not `RetentionHours`, limits how much history you have: 100K requests is about 17 minutes at 100 req/s.
 
 **SQLite backend** — pure Go (no CGo), WAL journal mode, `busy_timeout=5000ms`. The schema is created automatically on first open. Writes are synchronous in v1.0.0 — high-throughput workloads should stay on Memory until batched writes ship in v1.1. Comes from `github.com/glebarez/go-sqlite`, already a transitive dependency, so no new module is pulled in for Memory-only consumers.
 
@@ -320,8 +320,14 @@ Errors: pulse.ErrorConfig{
 
 Pulse automatically:
 - Recovers from panics and logs full stack traces
-- Captures request body on error responses (with size limit)
-- Redacts sensitive headers (`Authorization`, `Cookie`, `X-API-Key`, etc.)
+- Captures request context on error responses: method, path, query string, headers, and the body up to `MaxBodySize` (your handlers always receive the complete body)
+- Redacts secrets before anything is stored, broadcast, or exported:
+  - **Headers:** `Authorization`, `Cookie`, `X-API-Key`, `X-CSRF-Token`, `X-Amz-Security-Token`, and similar
+  - **JSON body fields, form keys, and query parameters** whose names look secret, at any nesting depth and in any naming style: `password`, `newPassword`, `card_number`, `cardNumber`, `api_key`, `client_secret`, `access_token`, `cvv`, `ssn`, `pin`, `otp`, …
+  - **Outbound URLs** recorded by `WrapHTTPClient`: userinfo passwords and sensitive query parameters
+- Fails closed: only JSON and form bodies are captured. Other content types (text, XML, multipart, binary) are stored as `[body omitted: N bytes of <type>]`, and a JSON body cut off at `MaxBodySize` is redacted up to the cut and flagged `body_truncated`
+
+If your payloads carry secrets under field names the redactor won't recognise, turn body capture off with `pulse.WithRequestBodyCaptureDisabled()`. Configurable field lists are planned for v1.1.
 - Fingerprints errors for deduplication (same error at same route = same group)
 - Classifies errors: `panic`, `validation`, `database`, `timeout`, `auth`, `not_found`, `internal`
 
@@ -483,7 +489,9 @@ Only one sample window is active at a time. Concurrent requests get `409 Conflic
 
 ### k6 test-run overlay
 
-Pulse exposes a `POST /pulse/api/test-runs` endpoint that any load-test harness can call at run start and end. The dashboard then renders each run as a vertical band on the latency / RPS / error charts, labelled with the test name. The killer view is *"when we ran the spike test, p95 climbed from 80 ms → 1100 ms then recovered to 95 ms within 90 s — recovery worked."*
+Pulse exposes a `POST /pulse/api/test-runs` endpoint that any load-test harness can call at run start and end (posting the same `id` twice updates the run). Runs are listed on the dashboard's **Test Runs** page with their duration and metadata, and `GET /pulse/api/test-runs?range=…` returns them for your own tooling.
+
+Drawing runs as bands on the latency / RPS / error charts, with a before/during/after comparison (*"p95 climbed from 80 ms → 1100 ms, then recovered within 90 s"*), is planned for v1.1.
 
 For k6 specifically, drop the bundled bridge into your test directory:
 
@@ -1107,7 +1115,7 @@ scrape_configs:
 **Key Design Decisions:**
 
 - **No CGo** — Uses `github.com/glebarez/sqlite` (pure Go SQLite driver) for maximum portability.
-- **Lock-free Ring Buffers** — `RingBuffer[T]` provides O(1) append with atomic operations, no locks on the hot path.
+- **Ring Buffers** — `RingBuffer[T]` appends in O(1) into a fixed-size slice (an atomic head index plus a short write lock), so memory stays bounded no matter how much traffic arrives.
 - **Async Storage** — All metric writes happen in goroutines to avoid blocking request handling.
 - **Background Lifecycle** — All background goroutines are managed via `context.Context` + `sync.WaitGroup` for clean shutdown.
 - **Pointer Config Fields** — `*bool` and `*float64` config fields distinguish between "not set" (use default) and "explicitly set to zero/false".
@@ -1119,13 +1127,16 @@ scrape_configs:
 Pulse manages background goroutines that should be stopped on shutdown:
 
 ```go
-p := pulse.Mount(router, db, cfg)
+ctx, cancel := context.WithCancel(context.Background())
+p := pulse.Mount(ctx, router, db /*, options... */)
 
-// On shutdown
+// On shutdown, either cancel the context passed to Mount…
+cancel()
+// …or call Shutdown, which also waits for the goroutines to exit and closes storage.
 p.Shutdown()
 ```
 
-This stops all background goroutines (runtime sampler, aggregator, health runner, alert engine, WebSocket hub) and waits for them to finish.
+Either way, all background goroutines (runtime sampler, aggregator, health runner, alert engine, WebSocket hub) stop. `Shutdown` additionally waits for them to finish and closes the storage backend, which flushes the SQLite database file cleanly.
 
 ---
 

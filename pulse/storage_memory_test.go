@@ -1,4 +1,4 @@
-﻿package pulse
+package pulse
 
 import (
 	"fmt"
@@ -16,11 +16,11 @@ func TestMemoryStorage_StoreAndGetRequests(t *testing.T) {
 
 	for i := 0; i < 10; i++ {
 		s.StoreRequest(RequestMetric{
-			Method:    "GET",
-			Path:      "/users",
+			Method:     "GET",
+			Path:       "/users",
 			StatusCode: 200,
-			Latency:   time.Duration(i+1) * 10 * time.Millisecond,
-			Timestamp: now.Add(time.Duration(i) * time.Second),
+			Latency:    time.Duration(i+1) * 10 * time.Millisecond,
+			Timestamp:  now.Add(time.Duration(i) * time.Second),
 		})
 	}
 

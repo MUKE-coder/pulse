@@ -16,16 +16,36 @@ const (
 	startTimeKey        = "pulse:start_time"
 )
 
+// n1TraceIdleTTL is how long an N+1 tally may sit untouched before the
+// sweeper finalizes it. Requests that pass through the tracing middleware
+// are finalized as soon as they complete; the sweeper only catches traces
+// nothing finalizes (queries run under a hand-built ContextWithTraceID, or
+// by goroutines that outlive their request).
+const n1TraceIdleTTL = 5 * time.Minute
+
 // PulsePlugin implements gorm.Plugin for query tracking.
 type PulsePlugin struct {
 	pulse *Pulse
 
-	// N+1 detection: tracks query patterns per request trace ID
-	n1Tracker   map[string]map[string]int // traceID -> normalizedSQL -> count
+	// N+1 detection: per-request tallies of repeated query patterns, keyed
+	// by trace ID. Entries are removed when the trace is finalized.
+	n1Tracker   map[string]*n1Trace
 	n1TrackerMu sync.Mutex
 
 	// Pool monitoring
 	poolDone chan struct{}
+}
+
+// n1Trace tallies the queries run under one trace ID.
+type n1Trace struct {
+	route    string // "METHOD /pattern", from the request context when known
+	lastSeen time.Time
+	patterns map[string]*n1Pattern // normalized SQL → tally
+}
+
+type n1Pattern struct {
+	count int
+	total time.Duration
 }
 
 // Name returns the plugin name as required by gorm.Plugin.
@@ -88,6 +108,9 @@ func (p *PulsePlugin) Initialize(db *gorm.DB) error {
 	// Start connection pool monitoring
 	p.startPoolMonitoring(db)
 
+	// Finalize N+1 tallies nothing else finalizes, so the tracker stays bounded.
+	p.startN1Sweeper()
+
 	return nil
 }
 
@@ -139,10 +162,11 @@ func (p *PulsePlugin) afterCallback(db *gorm.DB) {
 		callerFile, callerLine = findCaller()
 	}
 
-	// Get trace ID from context
-	var traceID string
+	// Get trace ID and matched route from context
+	var traceID, route string
 	if db.Statement.Context != nil {
 		traceID = TraceIDFromContext(db.Statement.Context)
+		route = RouteFromContext(db.Statement.Context)
 	}
 
 	metric := QueryMetric{
@@ -168,52 +192,86 @@ func (p *PulsePlugin) afterCallback(db *gorm.DB) {
 
 	// N+1 detection
 	if boolValue(cfg.DetectN1) && traceID != "" && normalized.Normalized != "" {
-		p.trackN1(traceID, normalized.Normalized, duration, db)
+		p.trackN1(traceID, route, normalized.Normalized, duration)
 	}
 }
 
-// trackN1 detects N+1 query patterns within a single request.
-func (p *PulsePlugin) trackN1(traceID, normalizedSQL string, duration time.Duration, db *gorm.DB) {
+// trackN1 tallies one execution of normalizedSQL under traceID. Detections
+// are emitted when the trace is finalized, so they carry the real repeat
+// count and summed duration rather than a snapshot at the threshold.
+func (p *PulsePlugin) trackN1(traceID, route, normalizedSQL string, duration time.Duration) {
 	p.n1TrackerMu.Lock()
 	defer p.n1TrackerMu.Unlock()
 
 	if p.n1Tracker == nil {
-		p.n1Tracker = make(map[string]map[string]int)
+		p.n1Tracker = make(map[string]*n1Trace)
 	}
 
-	patterns, ok := p.n1Tracker[traceID]
+	tr, ok := p.n1Tracker[traceID]
 	if !ok {
-		patterns = make(map[string]int)
-		p.n1Tracker[traceID] = patterns
+		tr = &n1Trace{route: route, patterns: make(map[string]*n1Pattern)}
+		p.n1Tracker[traceID] = tr
 	}
+	tr.lastSeen = time.Now()
 
-	patterns[normalizedSQL]++
-	count := patterns[normalizedSQL]
+	pat, ok := tr.patterns[normalizedSQL]
+	if !ok {
+		pat = &n1Pattern{}
+		tr.patterns[normalizedSQL] = pat
+	}
+	pat.count++
+	pat.total += duration
+}
 
+// finalizeTrace records an N1Detection for every query pattern that repeated
+// at least N1Threshold times under traceID, then forgets the trace. The
+// tracing middleware calls it when a request completes; route overrides the
+// route captured from the query context when non-empty.
+func (p *PulsePlugin) finalizeTrace(traceID, route string) {
+	p.n1TrackerMu.Lock()
+	tr := p.n1Tracker[traceID]
+	delete(p.n1Tracker, traceID)
+	p.n1TrackerMu.Unlock()
+
+	if tr == nil {
+		return
+	}
+	if route == "" {
+		route = tr.route
+	}
+	p.emitN1(traceID, route, tr)
+}
+
+// CleanupTraceN1 finalizes N+1 tracking for a completed request: detections
+// for patterns that crossed the threshold are recorded, then the trace's
+// tracking data is removed. The tracing middleware does this automatically;
+// call it yourself only for queries run under a hand-built
+// [ContextWithTraceID].
+func (p *PulsePlugin) CleanupTraceN1(traceID string) {
+	p.finalizeTrace(traceID, "")
+}
+
+// emitN1 stores one detection per pattern in tr at or above the threshold.
+func (p *PulsePlugin) emitN1(traceID, route string, tr *n1Trace) {
 	threshold := p.pulse.config.Database.N1Threshold
 	if threshold <= 0 {
 		threshold = 5
 	}
 
-	// Only fire on the exact threshold crossing to avoid duplicate detections
-	if count == threshold {
-		// Pull the matched route off the request context (stashed by the
-		// tracing middleware), and synthesise a fix hint.
-		var route string
-		if db.Statement.Context != nil {
-			route = RouteFromContext(db.Statement.Context)
+	now := time.Now()
+	for sql, pat := range tr.patterns {
+		if pat.count < threshold {
+			continue
 		}
-
-		totalDur := duration * time.Duration(count)
 		detection := N1Detection{
-			Pattern:        normalizedSQL,
-			Count:          count,
-			TotalDuration:  totalDur,
-			AvgDuration:    duration,
+			Pattern:        sql,
+			Count:          pat.count,
+			TotalDuration:  pat.total,
+			AvgDuration:    pat.total / time.Duration(pat.count),
 			RequestTraceID: traceID,
 			Route:          route,
-			SuggestedFix:   suggestN1Fix(normalizedSQL),
-			DetectedAt:     time.Now(),
+			SuggestedFix:   suggestN1Fix(sql),
+			DetectedAt:     now,
 		}
 
 		if err := p.pulse.storage.StoreN1Detection(detection); err != nil && p.pulse.config.DevMode {
@@ -223,10 +281,10 @@ func (p *PulsePlugin) trackN1(traceID, normalizedSQL string, duration time.Durat
 		if p.pulse.config.DevMode {
 			if route != "" {
 				p.pulse.logger.Printf("[pulse] N+1 detected in %s (sampled %s): %d× %q",
-					route, traceID, count, normalizedSQL)
+					route, traceID, pat.count, sql)
 			} else {
 				p.pulse.logger.Printf("[pulse] N+1 detected: %q repeated %d times in request %s",
-					normalizedSQL, count, traceID)
+					sql, pat.count, traceID)
 			}
 			if detection.SuggestedFix != "" {
 				p.pulse.logger.Printf("[pulse]   suggestion: %s", detection.SuggestedFix)
@@ -235,12 +293,38 @@ func (p *PulsePlugin) trackN1(traceID, normalizedSQL string, duration time.Durat
 	}
 }
 
-// CleanupTraceN1 removes N+1 tracking data for a completed request.
-// Called by the middleware after the request completes.
-func (p *PulsePlugin) CleanupTraceN1(traceID string) {
+// sweepIdleN1Traces finalizes every trace untouched for longer than
+// n1TraceIdleTTL as of now.
+func (p *PulsePlugin) sweepIdleN1Traces(now time.Time) {
 	p.n1TrackerMu.Lock()
-	defer p.n1TrackerMu.Unlock()
-	delete(p.n1Tracker, traceID)
+	stale := make(map[string]*n1Trace)
+	for id, tr := range p.n1Tracker {
+		if now.Sub(tr.lastSeen) > n1TraceIdleTTL {
+			stale[id] = tr
+			delete(p.n1Tracker, id)
+		}
+	}
+	p.n1TrackerMu.Unlock()
+
+	for id, tr := range stale {
+		p.emitN1(id, tr.route, tr)
+	}
+}
+
+// startN1Sweeper periodically finalizes idle N+1 traces.
+func (p *PulsePlugin) startN1Sweeper() {
+	p.pulse.startBackground("n1-sweeper", func(ctx context.Context) {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-ticker.C:
+				p.sweepIdleN1Traces(now)
+			}
+		}
+	})
 }
 
 // startPoolMonitoring starts a background goroutine to sample connection pool stats.

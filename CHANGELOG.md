@@ -7,6 +7,104 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.0.1] — Unreleased
+
+Patch release fixing correctness and privacy bugs found in a code review of
+v1.0.0. No source-level API changes; one additive field
+(`RequestContext.BodyTruncated`).
+
+### Fixed — request handling
+
+- **Handlers received truncated request bodies.** The error middleware
+  buffered the first `Errors.MaxBodySize` bytes (4 KB by default) of every
+  request, then replaced the body with just those bytes. Any larger request,
+  such as an upload or a big JSON payload, reached its handler cut short.
+  Handlers now receive the complete body; only Pulse's capture is capped.
+
+### Fixed — secrets in captured data (security)
+
+- **Truncated or malformed JSON bodies were stored unredacted.** Redaction
+  parsed the body and fell back to the raw bytes on any parse error. Every
+  JSON body longer than `MaxBodySize` is truncated, so it always failed to
+  parse. JSON is now redacted token by token: everything up to the cut-off
+  is emitted redacted, and nothing after it is emitted.
+- **Bodies of unrecognised content types were stored raw.** Only JSON and
+  form bodies are captured now. Anything else (text, XML, multipart, binary)
+  is recorded as `[body omitted: N bytes of <type>]`.
+- **Query strings were never redacted** in error records. **Outbound URLs**
+  recorded by `WrapHTTPClient` also kept query-string credentials and
+  userinfo passwords. Both are redacted now.
+- **Field matching was exact-name only**, so `newPassword`, `cardNumber`,
+  `stripeToken` and `clientSecret` slipped through. Names are now normalized
+  (case, `_`, `-`, `.`). Long names are matched against high-signal stems:
+  `password`, `secret`, `token`, `apikey`, `credential`, `privatekey`,
+  `cardnumber`, `signature`. Short names (`pin`, `ssn`, `cvv`, `otp`, …)
+  are matched exactly. More headers are redacted as well (`X-CSRF-Token`,
+  `X-Amz-Security-Token`, `X-Goog-Api-Key`, …).
+
+If you ran v1.0.0 with the SQLite backend, error records already on disk may
+contain unredacted bodies or query strings. Clear them with
+`POST /pulse/api/data/reset` (or delete the database file). An automatic
+scrub migration is planned for v1.1.
+
+### Fixed — N+1 detection
+
+- **Memory leak.** Per-request N+1 tallies were never removed:
+  `CleanupTraceN1` was never called outside tests. The tracker grew by one
+  map per traced request for the life of the process. The tracing
+  middleware now finalizes each request's tally when the request completes.
+  A sweeper finalizes tallies that have been idle for 5 minutes.
+- **Wrong counts.** A detection was recorded the moment a pattern reached
+  `N1Threshold`. `Count` therefore always equalled the threshold, and
+  `TotalDuration` was one query's duration × threshold. Detections now carry
+  the request's real repeat count and summed duration, so
+  `/database/n1/ranked` can tell 500 repeats from 5.
+- `CleanupTraceN1` now records a trace's detections before removing its
+  tally, since the middleware now calls it for exactly that.
+
+### Fixed — storage backends and alerts
+
+- **Test runs:** `MemoryStorage.StoreTestRun` appended instead of upserting
+  by ID, while SQLite already upserted. On Memory, the k6 bridge's start and
+  end calls produced two runs.
+- **Alert resolution now uses one model everywhere.** The firing record is
+  updated in place: same ID, original `FiredAt` and `Value`, state
+  `resolved`. Previously the backends and alert engines disagreed:
+  - Threshold alerts wrote a second record with a new ID, so the firing
+    record counted towards `ActiveAlerts` forever.
+  - SLO burn-rate alerts reused the ID. On Memory that appended a duplicate;
+    on SQLite it overwrote the firing record. In both cases `FiredAt` was
+    stamped with the resolve time.
+- A firing suppressed by `Alerts.Cooldown` no longer triggers a "resolved"
+  notification for an alert that was never announced.
+
+### Fixed — other
+
+- **Data race at startup.** Background subsystems began broadcasting before
+  the WebSocket hub existed. `go test -race` now passes.
+- The startup log no longer hard-codes `http://localhost:8080`. It also
+  reports the real storage backend; it used to always say "Memory".
+- Concurrent profile requests are now detected with a sentinel error rather
+  than by matching error text.
+
+### Docs
+
+- README:
+  - Documents body, query and URL redaction.
+  - Corrects the k6 overlay description: runs are listed on the Test Runs
+    page, and chart bands are planned for v1.1.
+  - Corrects the "lock-free" ring-buffer claims and notes that buffer
+    capacity limits Memory history.
+  - Fixes the Graceful Shutdown example.
+
+### Tooling
+
+- GitHub Actions CI runs `gofmt`, `go vet` and `go test -race`. It also
+  checks that the embedded dashboard in `ui/dist` matches its source. The
+  tree has been gofmt'd.
+
+---
+
 ## [1.0.0] — 2026-05-29
 
 🎉 **First stable release.** The public API surface defined in this release

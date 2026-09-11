@@ -349,6 +349,53 @@ func TestAlertEngine_Cooldown(t *testing.T) {
 	}
 }
 
+// TestAlertEngine_ResolvesInPlace checks a firing → resolved cycle leaves
+// exactly one record: the firing record, updated to resolved, keeping its
+// original firing value.
+func TestAlertEngine_ResolvesInPlace(t *testing.T) {
+	p := setupAlertPulse(t)
+	ae := &AlertEngine{pulse: p, ruleStates: make(map[string]*ruleState)}
+	rs := &ruleState{
+		rule:  AlertRule{Name: "in_place", Metric: "error_rate", Operator: ">", Threshold: 5, Severity: "warning"},
+		state: AlertStateFiring,
+	}
+
+	ae.fireAlert(rs, 42)
+	firedID := rs.alertID
+	ae.resolveAlert(rs)
+
+	alerts, _ := p.storage.GetAlerts(AlertFilter{})
+	if len(alerts) != 1 {
+		t.Fatalf("got %d alert records, want 1", len(alerts))
+	}
+	a := alerts[0]
+	if a.ID != firedID || a.State != AlertStateResolved || a.ResolvedAt == nil || a.Value != 42 {
+		t.Errorf("record not resolved in place: %+v", a)
+	}
+}
+
+// TestAlertEngine_CooldownSuppressedFiringIsNotResolved: when cooldown
+// suppresses a firing nothing is announced, so the recovery must not store or
+// announce a resolution either — nor overwrite the previous incident.
+func TestAlertEngine_CooldownSuppressedFiringIsNotResolved(t *testing.T) {
+	p := setupAlertPulse(t) // 1s cooldown
+	ae := &AlertEngine{pulse: p, ruleStates: make(map[string]*ruleState)}
+	rs := &ruleState{
+		rule:  AlertRule{Name: "flappy", Metric: "error_rate", Operator: ">", Threshold: 5, Severity: "warning"},
+		state: AlertStateFiring,
+	}
+
+	ae.fireAlert(rs, 10) // first incident
+	ae.resolveAlert(rs)
+	ae.fireAlert(rs, 11) // within cooldown — suppressed
+	ae.resolveAlert(rs)
+
+	alerts, _ := p.storage.GetAlerts(AlertFilter{})
+	if len(alerts) != 1 || alerts[0].Value != 10 || alerts[0].State != AlertStateResolved {
+		t.Fatalf("want only the first, resolved incident; got %+v", alerts)
+	}
+}
+
 func TestAlertEngine_PendingClearsOnRecovery(t *testing.T) {
 	p := setupAlertPulse(t)
 

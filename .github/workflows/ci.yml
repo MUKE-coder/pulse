@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test (race detector)
+        run: go test -race -count=1 ./...
+
+  dashboard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/dashboard/package-lock.json
+
+      - name: Build dashboard
+        working-directory: ui/dashboard
+        run: |
+          npm ci
+          npm run build
+
+      # ui/dist is embedded into the Go binary, so it must be rebuilt and
+      # committed whenever the dashboard source changes.
+      - name: ui/dist matches the dashboard source
+        run: |
+          if [ -n "$(git status --porcelain ui/dist)" ]; then
+            echo "ui/dist is stale. Run 'npm run build' in ui/dashboard and commit the result."
+            git status --porcelain ui/dist
+            exit 1
+          fi

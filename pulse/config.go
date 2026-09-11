@@ -9,7 +9,7 @@ import (
 )
 
 // Version is the current Pulse SDK version, bumped on each release.
-const Version = "1.0.0"
+const Version = "1.0.1"
 
 // DefaultUsername is the placeholder dashboard username shipped in defaults.
 // In production (DevMode=false) Pulse refuses to start while this value is in
@@ -24,8 +24,9 @@ const DefaultPassword = "pulse"
 type StorageDriver int
 
 const (
-	// Memory is the in-memory storage backend using ring buffers. Fast,
-	// allocation-free hot path, but data is lost on restart.
+	// Memory is the in-memory storage backend using fixed-capacity ring
+	// buffers. Fast and bounded, but data is lost on restart, and under
+	// sustained traffic buffer capacity (not RetentionHours) limits history.
 	Memory StorageDriver = iota
 
 	// SQLite is the persistent storage backend, backed by

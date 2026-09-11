@@ -1,4 +1,4 @@
-﻿package pulse
+package pulse
 
 import (
 	"context"

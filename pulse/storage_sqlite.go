@@ -303,10 +303,10 @@ func (s *SQLiteStorage) GetRequests(f RequestFilter) ([]RequestMetric, error) {
 	var out []RequestMetric
 	for rows.Next() {
 		var (
-			ts, lat   int64
-			m         RequestMetric
-			reqSize   int64
-			respSize  int64
+			ts, lat  int64
+			m        RequestMetric
+			reqSize  int64
+			respSize int64
 		)
 		if err := rows.Scan(&ts, &m.Method, &m.Path, &m.StatusCode, &lat,
 			&reqSize, &respSize, &m.ClientIP, &m.UserAgent, &m.Error, &m.TraceID); err != nil {
@@ -873,10 +873,10 @@ func (s *SQLiteStorage) GetAlerts(f AlertFilter) ([]AlertRecord, error) {
 	var out []AlertRecord
 	for rows.Next() {
 		var (
-			a          AlertRecord
-			fired      int64
-			resolved   sql.NullInt64
-			stateStr   string
+			a        AlertRecord
+			fired    int64
+			resolved sql.NullInt64
+			stateStr string
 		)
 		if err := rows.Scan(&a.ID, &a.RuleName, &a.Metric, &a.Value, &a.Threshold, &a.Operator,
 			&a.Severity, &stateStr, &a.Route, &a.Message, &fired, &resolved); err != nil {
@@ -927,10 +927,10 @@ func (s *SQLiteStorage) GetDependencyStats(tr TimeRange) ([]DependencyStats, err
 	}{}
 	for rows.Next() {
 		var (
-			ts, lat   int64
-			name      string
-			code      int
-			errStr    string
+			ts, lat int64
+			name    string
+			code    int
+			errStr  string
 		)
 		if err := rows.Scan(&ts, &name, &code, &lat, &errStr); err != nil {
 			return nil, err
@@ -1029,10 +1029,10 @@ func (s *SQLiteStorage) GetTestRuns(tr TimeRange) ([]TestRun, error) {
 	var out []TestRun
 	for rows.Next() {
 		var (
-			r        TestRun
-			started  int64
-			ended    sql.NullInt64
-			meta     string
+			r       TestRun
+			started int64
+			ended   sql.NullInt64
+			meta    string
 		)
 		if err := rows.Scan(&r.ID, &r.Name, &r.Type, &started, &ended, &meta); err != nil {
 			return nil, err

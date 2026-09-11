@@ -5,9 +5,10 @@ import (
 	"sync/atomic"
 )
 
-// RingBuffer is a lock-free, fixed-capacity circular buffer for high-throughput
-// metric ingestion. When full, the oldest items are silently overwritten.
-// Push is lock-free (atomic CAS on head). Read operations take a read lock.
+// RingBuffer is a fixed-capacity circular buffer for high-throughput metric
+// ingestion. When full, the oldest items are silently overwritten.
+// Push claims a slot with an atomic increment of head, then takes a short
+// write lock to store the item. Read operations take a read lock.
 type RingBuffer[T any] struct {
 	data     []T
 	head     atomic.Int64

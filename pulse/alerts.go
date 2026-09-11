@@ -27,11 +27,12 @@ type AlertEngine struct {
 
 // ruleState tracks the evaluation state of a single alert rule.
 type ruleState struct {
-	rule      AlertRule
-	state     AlertState
-	pendingSince time.Time    // when condition first became true
-	lastFired    time.Time    // when last notification was sent
-	alertID      string       // current alert record ID
+	rule         AlertRule
+	state        AlertState
+	pendingSince time.Time // when condition first became true
+	lastFired    time.Time // when last notification was sent
+	alertID      string    // open (firing) alert record ID; "" when none was stored
+	firedValue   float64   // metric value when the open alert fired
 }
 
 // Built-in default alert rules.
@@ -292,12 +293,16 @@ func (ae *AlertEngine) checkCondition(value float64, operator string, threshold 
 func (ae *AlertEngine) fireAlert(rs *ruleState, value float64) {
 	cooldown := ae.pulse.config.Alerts.Cooldown
 	if cooldown > 0 && !rs.lastFired.IsZero() && time.Since(rs.lastFired) < cooldown {
-		return // Still in cooldown
+		// Still in cooldown: nothing is stored or announced, so there is no
+		// open record for resolveAlert to close either.
+		rs.alertID = ""
+		return
 	}
 
 	alertID := GenerateTraceID()
 	rs.alertID = alertID
 	rs.lastFired = time.Now()
+	rs.firedValue = value
 
 	alert := AlertRecord{
 		ID:        alertID,
@@ -328,13 +333,19 @@ func (ae *AlertEngine) fireAlert(rs *ruleState, value float64) {
 	}
 }
 
-// resolveAlert marks an alert as resolved and sends resolution notifications.
+// resolveAlert closes the open alert record in place — same ID, original
+// firing time and value, state resolved — and sends resolution
+// notifications.
 func (ae *AlertEngine) resolveAlert(rs *ruleState) {
+	if rs.alertID == "" {
+		return // the firing was suppressed by cooldown; nothing was announced
+	}
 	now := time.Now()
 	alert := AlertRecord{
-		ID:         GenerateTraceID(),
+		ID:         rs.alertID,
 		RuleName:   rs.rule.Name,
 		Metric:     rs.rule.Metric,
+		Value:      rs.firedValue,
 		Threshold:  rs.rule.Threshold,
 		Operator:   rs.rule.Operator,
 		Severity:   rs.rule.Severity,
@@ -348,6 +359,7 @@ func (ae *AlertEngine) resolveAlert(rs *ruleState) {
 	if err := ae.pulse.storage.StoreAlert(alert); err != nil && ae.pulse.config.DevMode {
 		ae.pulse.logger.Printf("[pulse] failed to store resolved alert: %v", err)
 	}
+	rs.alertID = ""
 
 	ae.pulse.BroadcastAlert(alert)
 

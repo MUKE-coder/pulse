@@ -1,10 +1,13 @@
-﻿package pulse
+package pulse
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -41,7 +44,7 @@ func setupTestPulseWithDB(t *testing.T) (*gorm.DB, *Pulse) {
 
 	plugin := &PulsePlugin{
 		pulse:     p,
-		n1Tracker: make(map[string]map[string]int),
+		n1Tracker: make(map[string]*n1Trace),
 	}
 	p.gormPlugin = plugin
 
@@ -207,6 +210,9 @@ func TestGormPlugin_N1Detection(t *testing.T) {
 	}
 	time.Sleep(100 * time.Millisecond)
 
+	// No tracing middleware here, so finalize the hand-built trace ourselves.
+	p.gormPlugin.CleanupTraceN1("trace-n1-test")
+
 	detections, _ := p.storage.GetN1Detections(TimeRange{
 		Start: time.Now().Add(-time.Minute),
 		End:   time.Now().Add(time.Minute),
@@ -219,8 +225,9 @@ func TestGormPlugin_N1Detection(t *testing.T) {
 		if d.RequestTraceID != "trace-n1-test" {
 			t.Errorf("expected trace ID 'trace-n1-test', got %q", d.RequestTraceID)
 		}
-		if d.Count < 5 {
-			t.Errorf("expected count >= 5, got %d", d.Count)
+		// The real repeat count (one lookup per user), not the threshold.
+		if d.Count != len(users) {
+			t.Errorf("expected count %d, got %d", len(users), d.Count)
 		}
 	}
 }
@@ -270,12 +277,15 @@ func TestGormPlugin_CleanupTraceN1(t *testing.T) {
 
 	plugin := &PulsePlugin{
 		pulse:     p,
-		n1Tracker: make(map[string]map[string]int),
+		n1Tracker: make(map[string]*n1Trace),
 	}
 
-	// Simulate tracking
-	plugin.n1Tracker["trace-1"] = map[string]int{"select * from users where id = ?": 3}
-	plugin.n1Tracker["trace-2"] = map[string]int{"select * from posts where id = ?": 1}
+	// trace-1 repeats one pattern 6 times (over the default threshold of 5);
+	// trace-2 runs a single query.
+	for i := 0; i < 6; i++ {
+		plugin.trackN1("trace-1", "GET /users", "select * from users where id = ?", 2*time.Millisecond)
+	}
+	plugin.trackN1("trace-2", "GET /posts", "select * from posts where id = ?", time.Millisecond)
 
 	plugin.CleanupTraceN1("trace-1")
 
@@ -284,6 +294,99 @@ func TestGormPlugin_CleanupTraceN1(t *testing.T) {
 	}
 	if _, exists := plugin.n1Tracker["trace-2"]; !exists {
 		t.Error("expected trace-2 to still exist")
+	}
+
+	detections, _ := p.storage.GetN1Detections(TimeRange{
+		Start: time.Now().Add(-time.Minute),
+		End:   time.Now().Add(time.Minute),
+	})
+	if len(detections) != 1 {
+		t.Fatalf("expected 1 detection, got %d", len(detections))
+	}
+	d := detections[0]
+	if d.Count != 6 || d.TotalDuration != 12*time.Millisecond || d.AvgDuration != 2*time.Millisecond || d.Route != "GET /users" {
+		t.Errorf("detection = %+v, want 6 queries totalling 12ms on GET /users", d)
+	}
+}
+
+// TestGormPlugin_N1FinalizedPerRequest drives real requests through the
+// tracing middleware. Every request's tally must be finalized — v1.0.0 never
+// removed them, leaking one map per request — and each detection must carry
+// that request's real query count rather than the threshold.
+func TestGormPlugin_N1FinalizedPerRequest(t *testing.T) {
+	db := setupTestDB(t)
+	db.Create(&TestUser{Name: "N1", Age: 1})
+
+	router := gin.New()
+	p := Mount(context.Background(), router, db, WithDevMode())
+	t.Cleanup(func() { p.Shutdown() })
+
+	const perRequest, requests = 12, 20
+	router.GET("/loop", func(c *gin.Context) {
+		for i := 0; i < perRequest; i++ {
+			var u TestUser
+			db.WithContext(c.Request.Context()).First(&u)
+		}
+		c.Status(http.StatusOK)
+	})
+	for i := 0; i < requests; i++ {
+		router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/loop", nil))
+	}
+
+	p.gormPlugin.n1TrackerMu.Lock()
+	remaining := len(p.gormPlugin.n1Tracker)
+	p.gormPlugin.n1TrackerMu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("n1Tracker holds %d traces after every request completed, want 0", remaining)
+	}
+
+	detections, _ := p.storage.GetN1Detections(TimeRange{
+		Start: time.Now().Add(-time.Minute),
+		End:   time.Now().Add(time.Minute),
+	})
+	if len(detections) != requests {
+		t.Fatalf("expected %d detections (one per request), got %d", requests, len(detections))
+	}
+	for _, d := range detections {
+		if d.Count != perRequest || d.Route != "GET /loop" {
+			t.Fatalf("detection = %d× on %q, want %d× on GET /loop", d.Count, d.Route, perRequest)
+		}
+	}
+}
+
+// TestGormPlugin_SweepFinalizesIdleTraces covers traces nothing finalizes
+// (hand-built trace contexts, goroutines outliving their request).
+func TestGormPlugin_SweepFinalizesIdleTraces(t *testing.T) {
+	p := newPulse(context.Background(), applyDefaults(Config{}))
+	p.storage = NewMemoryStorage("test")
+	defer p.Shutdown()
+
+	plugin := &PulsePlugin{pulse: p, n1Tracker: make(map[string]*n1Trace)}
+	for i := 0; i < 5; i++ {
+		plugin.trackN1("orphan", "", "select * from posts where author_id = ?", time.Millisecond)
+	}
+	plugin.trackN1("active", "", "select 1", time.Millisecond)
+
+	plugin.sweepIdleN1Traces(time.Now())
+	if len(plugin.n1Tracker) != 2 {
+		t.Fatalf("sweep finalized fresh traces: %d left, want 2", len(plugin.n1Tracker))
+	}
+
+	plugin.n1Tracker["orphan"].lastSeen = time.Now().Add(-2 * n1TraceIdleTTL)
+	plugin.sweepIdleN1Traces(time.Now())
+
+	if _, ok := plugin.n1Tracker["orphan"]; ok {
+		t.Error("expected idle trace to be swept")
+	}
+	if _, ok := plugin.n1Tracker["active"]; !ok {
+		t.Error("expected active trace to remain")
+	}
+	detections, _ := p.storage.GetN1Detections(TimeRange{
+		Start: time.Now().Add(-time.Minute),
+		End:   time.Now().Add(time.Minute),
+	})
+	if len(detections) != 1 || detections[0].Count != 5 {
+		t.Fatalf("expected one 5× detection from the swept trace, got %+v", detections)
 	}
 }
 
@@ -302,7 +405,7 @@ func BenchmarkGormPlugin_Callback(b *testing.B) {
 
 	plugin := &PulsePlugin{
 		pulse:     p,
-		n1Tracker: make(map[string]map[string]int),
+		n1Tracker: make(map[string]*n1Trace),
 	}
 	db.Use(plugin)
 

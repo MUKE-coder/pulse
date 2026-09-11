@@ -426,7 +426,7 @@ func TestCaptureRequestContext_RedactsHeaders(t *testing.T) {
 	c.Request.Header.Set("Content-Type", "application/json")
 	c.Request.Header.Set("Accept", "text/html")
 
-	ctx := captureRequestContext(c, nil)
+	ctx := captureRequestContext(c, capturedBody{})
 
 	if ctx.Headers["Authorization"] != "[REDACTED]" {
 		t.Errorf("expected Authorization redacted, got %q", ctx.Headers["Authorization"])

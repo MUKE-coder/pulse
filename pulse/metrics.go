@@ -51,14 +51,17 @@ type RuntimeMetric struct {
 
 // RequestContext captures relevant context from an HTTP request for error records.
 type RequestContext struct {
-	Method      string            `json:"method"`
-	Path        string            `json:"path"`
-	Query       string            `json:"query,omitempty"`
-	Headers     map[string]string `json:"headers,omitempty"`
-	Body        string            `json:"body,omitempty"`
-	ClientIP    string            `json:"client_ip"`
-	UserAgent   string            `json:"user_agent"`
-	ContentType string            `json:"content_type,omitempty"`
+	Method  string            `json:"method"`
+	Path    string            `json:"path"`
+	Query   string            `json:"query,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"`
+	Body    string            `json:"body,omitempty"`
+	// BodyTruncated is set when Body holds only the first
+	// ErrorConfig.MaxBodySize bytes of a longer request body.
+	BodyTruncated bool   `json:"body_truncated,omitempty"`
+	ClientIP      string `json:"client_ip"`
+	UserAgent     string `json:"user_agent"`
+	ContentType   string `json:"content_type,omitempty"`
 }
 
 // ErrorRecord represents an aggregated error occurrence.
@@ -254,16 +257,16 @@ type N1Detection struct {
 // score equal to occurrences × queries-per-occurrence × avg query duration —
 // roughly "total wall-clock cost across all observed requests".
 type N1Ranking struct {
-	Route               string        `json:"route"`
-	Pattern             string        `json:"pattern"`
-	Occurrences         int           `json:"occurrences"`            // how many distinct requests hit this N+1
-	AvgQueriesPerHit    float64       `json:"avg_queries_per_hit"`    // queries-per-occurrence
-	AvgQueryDuration    time.Duration `json:"avg_query_duration"`
-	TotalDuration       time.Duration `json:"total_duration"`         // sum across all occurrences
-	ImpactScore         float64       `json:"impact_score"`           // sort key (higher = worse)
-	SuggestedFix        string        `json:"suggested_fix,omitempty"`
-	FirstSeen           time.Time     `json:"first_seen"`
-	LastSeen            time.Time     `json:"last_seen"`
+	Route            string        `json:"route"`
+	Pattern          string        `json:"pattern"`
+	Occurrences      int           `json:"occurrences"`         // how many distinct requests hit this N+1
+	AvgQueriesPerHit float64       `json:"avg_queries_per_hit"` // queries-per-occurrence
+	AvgQueryDuration time.Duration `json:"avg_query_duration"`
+	TotalDuration    time.Duration `json:"total_duration"` // sum across all occurrences
+	ImpactScore      float64       `json:"impact_score"`   // sort key (higher = worse)
+	SuggestedFix     string        `json:"suggested_fix,omitempty"`
+	FirstSeen        time.Time     `json:"first_seen"`
+	LastSeen         time.Time     `json:"last_seen"`
 }
 
 // PoolStats holds database connection pool statistics.
@@ -310,10 +313,9 @@ type DependencyStats struct {
 }
 
 // TestRun records a synthetic load-test execution (k6, Vegeta, or any tool
-// that POSTs to /pulse/api/test-runs). The dashboard overlays test runs as
-// vertical bands on the latency / RPS / error-rate timelines so operators
-// can see "the spike test ran from t to t+9m, here's what production
-// p95 did during that window."
+// that POSTs to /pulse/api/test-runs), so operators can line a run up
+// against what production latency and error rates did during that window.
+// Posting a run again with the same ID updates it.
 //
 // ID is assigned by the server when StartedAt is in the future or zero (a
 // "starting" run); for a one-shot record both timestamps are supplied by
@@ -321,7 +323,7 @@ type DependencyStats struct {
 type TestRun struct {
 	ID        string                 `json:"id"`
 	Name      string                 `json:"name"`
-	Type      string                 `json:"type"`             // "k6.average-load", "vegeta", custom
+	Type      string                 `json:"type"` // "k6.average-load", "vegeta", custom
 	StartedAt time.Time              `json:"started_at"`
 	EndedAt   time.Time              `json:"ended_at,omitempty"`
 	Metadata  map[string]interface{} `json:"metadata,omitempty"`

@@ -36,6 +36,10 @@ const ProfileEnabledEnv = "PULSE_PROFILE_ENABLED"
 // (either the config field is false or the env var isn't set).
 var errProfilingDisabled = errors.New("profiling is disabled — set Config.Profiling.Enabled and PULSE_PROFILE_ENABLED=true")
 
+// errProfileInFlight is returned by [profileSampler.Sample] when another
+// sample window is already running. The API maps it to 409 Conflict.
+var errProfileInFlight = errors.New("a profile window is already in flight; try again in a moment")
+
 // FlameNode is one node in the folded stack tree.
 type FlameNode struct {
 	Name     string                `json:"name"`
@@ -50,7 +54,7 @@ type profileSampler struct {
 	pulse *Pulse
 
 	// running ensures only one sample window is active at a time. Concurrent
-	// requests get 429 — running a second profile while one is in flight
+	// requests get 409 Conflict — running a second profile while one is in flight
 	// can produce confusing overlapping data and roughly doubles CPU cost.
 	running atomic.Bool
 
@@ -70,8 +74,7 @@ func newProfileSampler(p *Pulse) *profileSampler {
 
 // Sample runs a sampling window of the requested duration at the given
 // rate, returning the folded tree. Returns errProfilingDisabled when not
-// permitted, and an error containing "already running" when a window is
-// already in flight.
+// permitted, and errProfileInFlight when a window is already in flight.
 //
 // Sampling is best-effort: GoroutineProfile gives us the call stack of
 // every live goroutine, not just the currently-on-CPU one. We treat each
@@ -83,7 +86,7 @@ func (s *profileSampler) Sample(ctx context.Context, duration time.Duration, hz 
 		return nil, errProfilingDisabled
 	}
 	if !s.running.CompareAndSwap(false, true) {
-		return nil, errors.New("a profile window is already in flight; try again in a moment")
+		return nil, errProfileInFlight
 	}
 	defer s.running.Store(false)
 

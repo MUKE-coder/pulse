@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -627,7 +628,7 @@ func useHandler(p *Pulse) gin.HandlerFunc {
 // --- Test runs (k6 / load-test overlay) ---
 
 // testRunsListHandler returns recorded test runs in the requested window.
-// Used by the dashboard to render vertical bands on the timeline charts.
+// Used by the dashboard's Test Runs page.
 func testRunsListHandler(p *Pulse) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		tr := parseTimeRangeParam(c)
@@ -717,7 +718,7 @@ func runOrCacheProfile(c *gin.Context, p *Pulse) (*FlameNode, int, error) {
 	if err != nil {
 		// Already-running is a 409, anything else (config flip mid-flight
 		// etc.) is a 503.
-		if strings.Contains(err.Error(), "already") {
+		if errors.Is(err, errProfileInFlight) {
 			return nil, http.StatusConflict, err
 		}
 		return nil, http.StatusServiceUnavailable, err

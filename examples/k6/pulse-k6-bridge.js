@@ -1,9 +1,9 @@
 // Pulse ↔ k6 bridge.
 //
 // Drop this file into your k6 test directory and import the helpers below
-// to overlay your k6 runs on Pulse's production timeline. The dashboard
-// then renders each run as a vertical band on the latency / RPS / error
-// charts, labelled with the test name.
+// to record your k6 runs in Pulse. Runs appear on the dashboard's Test Runs
+// page and from GET /pulse/api/test-runs. Drawing them as bands on the
+// timeline charts is planned for v1.1.
 //
 // Usage in your k6 script:
 //

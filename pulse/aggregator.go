@@ -14,12 +14,12 @@ import (
 type Aggregator struct {
 	pulse *Pulse
 
-	mu            sync.RWMutex
-	routeStats    []RouteStats
-	overview      *Overview
-	throughputTS  []TimeSeriesPoint // request count per bucket
-	errorTS       []TimeSeriesPoint // error count per bucket
-	latencyTS     []TimeSeriesPoint // avg latency per bucket
+	mu           sync.RWMutex
+	routeStats   []RouteStats
+	overview     *Overview
+	throughputTS []TimeSeriesPoint // request count per bucket
+	errorTS      []TimeSeriesPoint // error count per bucket
+	latencyTS    []TimeSeriesPoint // avg latency per bucket
 }
 
 // newAggregator creates and starts the aggregation background loop.

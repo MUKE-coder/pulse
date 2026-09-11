@@ -59,8 +59,8 @@ func Mount(ctx context.Context, router *gin.Engine, db *gorm.DB, opts ...Option)
 		cfg.Dashboard.Username == DefaultUsername &&
 		cfg.Dashboard.Password == DefaultPassword &&
 		!cfg.Dashboard.AllowDefaultCredentials {
-		log.Fatalf("[pulse] refusing to start: dashboard is using the default credentials %q/%q in production " +
-			"(DevMode=false). Set Dashboard.Username and Dashboard.Password to non-default values, " +
+		log.Fatalf("[pulse] refusing to start: dashboard is using the default credentials %q/%q in production "+
+			"(DevMode=false). Set Dashboard.Username and Dashboard.Password to non-default values, "+
 			"or set Dashboard.AllowDefaultCredentials=true to override.",
 			DefaultUsername, DefaultPassword)
 	}
@@ -86,6 +86,14 @@ func Mount(ctx context.Context, router *gin.Engine, db *gorm.DB, opts ...Option)
 		p.storage = NewMemoryStorage(cfg.AppName)
 	}
 
+	// Start the WebSocket hub before any subsystem that broadcasts (runtime
+	// sampler, aggregator, health runner, alerts): their goroutines read
+	// p.wsHub, so it must be set before the first of them starts.
+	p.wsHub = newWebSocketHub(p)
+	p.startBackground("websocket-hub", func(ctx context.Context) {
+		p.wsHub.run()
+	})
+
 	// Start retention sweeper (drops error/alert/N+1 records older than
 	// Storage.RetentionHours). Ring buffers self-trim, so this is only
 	// useful for the unbounded maps in MemoryStorage.
@@ -95,7 +103,7 @@ func Mount(ctx context.Context, router *gin.Engine, db *gorm.DB, opts ...Option)
 	if db != nil && boolValue(cfg.Database.Enabled) {
 		plugin := &PulsePlugin{
 			pulse:     p,
-			n1Tracker: make(map[string]map[string]int),
+			n1Tracker: make(map[string]*n1Trace),
 		}
 		p.gormPlugin = plugin
 		if err := db.Use(plugin); err != nil {
@@ -154,12 +162,6 @@ func Mount(ctx context.Context, router *gin.Engine, db *gorm.DB, opts ...Option)
 		router.Use(newTracingMiddleware(p))
 	}
 
-	// Start WebSocket hub
-	p.wsHub = newWebSocketHub(p)
-	p.startBackground("websocket-hub", func(ctx context.Context) {
-		p.wsHub.run()
-	})
-
 	// Register public health endpoints (no auth required)
 	if boolValue(cfg.Health.Enabled) {
 		registerHealthRoutes(router, p)
@@ -180,7 +182,8 @@ func Mount(ctx context.Context, router *gin.Engine, db *gorm.DB, opts ...Option)
 	prefix := cfg.Prefix
 	registerDashboardRoutes(router, prefix, cfg)
 
-	log.Printf("[pulse] mounted at %s — dashboard: http://localhost:8080%s/ui/", prefix, prefix)
+	log.Printf("[pulse] mounted at %s — dashboard at %s/ui/ (storage: %s)",
+		prefix, prefix, storageDriverName(cfg.Storage.Driver))
 	if cfg.DevMode {
 		log.Printf("[pulse] dev mode enabled — verbose logging active")
 	}
@@ -402,8 +405,10 @@ func placeholderHTML(cfg Config) string {
 }
 
 func storageDriverName(d StorageDriver) string {
-	// Only Memory is implemented in v0.1.0. Future drivers add cases here.
-	_ = d
-	return "Memory"
+	switch d {
+	case SQLite:
+		return "SQLite"
+	default:
+		return "Memory"
+	}
 }
-

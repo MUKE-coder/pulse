@@ -46,7 +46,7 @@ type USESnapshot struct {
 
 // ResourceUSE is one row of the U/S/E grid.
 type ResourceUSE struct {
-	Name        string    `json:"name"`        // CPU, Memory, Disk, ...
+	Name        string    `json:"name"` // CPU, Memory, Disk, ...
 	Utilization USEMetric `json:"utilization"`
 	Saturation  USEMetric `json:"saturation"`
 	Errors      USEMetric `json:"errors"`
@@ -324,10 +324,10 @@ func (s *useSampler) sampleNetwork(now time.Time, src map[string]string) Resourc
 			Level:       band(errDelta/dt, 1, 10),
 		}
 		r.Errors = USEMetric{
-			Value: float64(curr[0].Errin + curr[0].Errout),
-			Display: fmt.Sprintf("%d total errors", curr[0].Errin+curr[0].Errout),
+			Value:       float64(curr[0].Errin + curr[0].Errout),
+			Display:     fmt.Sprintf("%d total errors", curr[0].Errin+curr[0].Errout),
 			Description: "Cumulative interface errors since boot.",
-			Level: levelFromError(curr[0].Errin + curr[0].Errout),
+			Level:       levelFromError(curr[0].Errin + curr[0].Errout),
 		}
 	}
 
@@ -434,4 +434,3 @@ func unknownMetric(desc string) USEMetric {
 func warmingUpMetric(desc string) USEMetric {
 	return USEMetric{Display: "warming up", Level: LevelUnknown, Description: desc}
 }
-

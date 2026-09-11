@@ -3,7 +3,9 @@ package pulse
 import (
 	"context"
 	"net/http/httptest"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -172,6 +174,79 @@ func TestProfileFlamegraphAPI_JSONFormat(t *testing.T) {
 	}
 	if !strings.HasPrefix(strings.TrimSpace(w.Body.String()), "{") {
 		t.Fatalf("JSON output should start with '{', got %q", w.Body.String()[:40])
+	}
+}
+
+// TestProfileAPI_EachGateAloneReturns503 checks both directions of the double
+// gate at the HTTP layer: the config flag without the env var, and the env
+// var without the config flag.
+func TestProfileAPI_EachGateAloneReturns503(t *testing.T) {
+	cases := []struct {
+		name string
+		env  string
+		opts []Option
+	}{
+		{"config flag only", "", []Option{WithDevMode(), WithProfiling()}},
+		{"env var only", "true", []Option{WithDevMode()}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(ProfileEnabledEnv, tc.env)
+			router := gin.New()
+			p := Mount(context.Background(), router, nil, tc.opts...)
+			t.Cleanup(func() { p.Shutdown() })
+
+			token := signJWT(jwtClaims{
+				Username: "test", Iat: time.Now().Unix(), Exp: time.Now().Add(time.Hour).Unix(),
+			}, p.config.Dashboard.SecretKey)
+
+			for _, path := range []string{"/pulse/api/profile/flamegraph", "/pulse/api/profile/folded"} {
+				req := httptest.NewRequest("GET", path+"?duration=100ms", nil)
+				req.Header.Set("Authorization", "Bearer "+token)
+				w := httptest.NewRecorder()
+				router.ServeHTTP(w, req)
+				if w.Code != 503 {
+					t.Errorf("%s: status = %d, want 503", path, w.Code)
+				}
+			}
+		})
+	}
+}
+
+// TestProfileAPI_ConcurrentRequestsConflict fires two sample windows at once:
+// exactly one must run and the other must get 409, never two overlapping
+// samples.
+func TestProfileAPI_ConcurrentRequestsConflict(t *testing.T) {
+	t.Setenv(ProfileEnabledEnv, "true")
+	router := gin.New()
+	p := Mount(context.Background(), router, nil, WithDevMode(), WithProfiling())
+	t.Cleanup(func() { p.Shutdown() })
+
+	token := signJWT(jwtClaims{
+		Username: "test", Iat: time.Now().Unix(), Exp: time.Now().Add(time.Hour).Unix(),
+	}, p.config.Dashboard.SecretKey)
+
+	codes := make([]int, 2)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range codes {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			req := httptest.NewRequest("GET", "/pulse/api/profile/folded?duration=500ms&hz=20", nil)
+			req.Header.Set("Authorization", "Bearer "+token)
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+			codes[i] = w.Code
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	sort.Ints(codes)
+	if codes[0] != 200 || codes[1] != 409 {
+		t.Fatalf("status codes = %v, want one 200 and one 409", codes)
 	}
 }
 

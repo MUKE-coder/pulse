@@ -43,7 +43,7 @@ type Client struct {
 	send chan []byte
 
 	// Subscribed channels.
-	mu      sync.RWMutex
+	mu       sync.RWMutex
 	channels map[string]bool
 }
 

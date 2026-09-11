@@ -245,6 +245,34 @@ func TestSLOAPIEndpoint(t *testing.T) {
 
 // --- helpers ---
 
+// TestSLOEvaluator_ResolvesInPlace checks a burn-rate firing → resolved cycle
+// leaves one record carrying the original firing time and burn rate. v1.0.0
+// stamped the resolution with the resolve time instead.
+func TestSLOEvaluator_ResolvesInPlace(t *testing.T) {
+	p := newTestPulse(t)
+	slo := SLO{Name: "in-place", Target: 0.99, Window: time.Hour, Indicator: SLIErrorRate{}}
+	ba := BurnRateAlert{Name: "fast-burn", Window: 5 * time.Minute, BurnRateMultiple: 2, Severity: "critical"}
+	ev := &sloEvaluator{
+		pulse:  p,
+		slos:   []SLO{slo},
+		status: make(map[string]SLOStatus),
+		firing: make(map[string]map[string]sloFiring),
+	}
+
+	firedAt := time.Now().Add(-10 * time.Minute)
+	ev.reconcileAlert(slo, ba, 30, 0.7, true, firedAt)
+	ev.reconcileAlert(slo, ba, 0.5, 0.995, false, time.Now())
+
+	alerts, _ := p.storage.GetAlerts(AlertFilter{})
+	if len(alerts) != 1 {
+		t.Fatalf("got %d alert records, want 1", len(alerts))
+	}
+	a := alerts[0]
+	if a.State != AlertStateResolved || a.ResolvedAt == nil || !a.FiredAt.Equal(firedAt) || a.Value != 30 {
+		t.Errorf("record not resolved in place: %+v", a)
+	}
+}
+
 func newTestPulse(t *testing.T) *Pulse {
 	t.Helper()
 	cfg := applyDefaults(Config{DevMode: true})

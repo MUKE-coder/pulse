@@ -1,12 +1,11 @@
 package pulse
 
 import (
+	"bytes"
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"runtime"
 	"strings"
 	"time"
@@ -25,122 +24,40 @@ const (
 	ErrorTypeInternal   = "internal"
 )
 
-// Sensitive header names that should be redacted in request context.
-var sensitiveHeaders = map[string]bool{
-	"authorization":       true,
-	"cookie":              true,
-	"set-cookie":          true,
-	"x-api-key":           true,
-	"x-auth-token":        true,
-	"proxy-authorization": true,
+// capturedBody is what the error middleware kept of a request body.
+type capturedBody struct {
+	data    []byte // first ≤ MaxBodySize bytes; nil when omitted
+	size    int64  // the request's Content-Length
+	omitted bool   // content type Pulse cannot redact — record the size only
 }
 
-// sensitiveBodyFields are field names whose values are redacted in captured
-// request bodies. Matching is case-insensitive and exact-on-name (not
-// substring), so a field named `description` is not flagged just because it
-// contains "secret" as a substring. Add to this list as needed.
-var sensitiveBodyFields = map[string]bool{
-	"password":              true,
-	"pass":                  true,
-	"passwd":                true,
-	"new_password":          true,
-	"current_password":      true,
-	"old_password":          true,
-	"password_confirmation": true,
-	"secret":                true,
-	"client_secret":         true,
-	"token":                 true,
-	"access_token":          true,
-	"refresh_token":         true,
-	"id_token":              true,
-	"api_key":               true,
-	"apikey":                true,
-	"authorization":         true,
-	"auth":                  true,
-	"private_key":           true,
-	"ssn":                   true,
-	"card_number":           true,
-	"cardnumber":            true,
-	"cc_number":             true,
-	"cvv":                   true,
-	"cvc":                   true,
-	"pin":                   true,
-}
-
-const redactedPlaceholder = "[REDACTED]"
-
-// redactBody returns a redacted copy of body suitable for capture.
+// captureBody buffers up to maxSize bytes of req's body for later capture,
+// then re-attaches a reader that replays those bytes followed by the unread
+// remainder, so handlers always receive the complete body.
 //
-// Behaviour by content type:
-//   - application/json (or */*+json): parsed, sensitive field values replaced.
-//     A field named one of sensitiveBodyFields has its value swapped for the
-//     literal "[REDACTED]" regardless of depth.
-//   - application/x-www-form-urlencoded: same treatment per form key.
-//   - everything else: returned unchanged (caller already limits size).
-//
-// On parse failure the original bytes are returned — losing structured
-// redaction is better than losing the body entirely, and the request was
-// already malformed enough to error out.
-func redactBody(contentType string, body []byte) []byte {
-	if len(body) == 0 {
+// Bodies of content types the redactor does not understand are never read;
+// they are recorded as a size marker instead.
+func captureBody(req *http.Request, maxSize int) capturedBody {
+	body := capturedBody{size: req.ContentLength}
+	if !redactableContentType(req.Header.Get("Content-Type")) {
+		body.omitted = true
 		return body
 	}
-	ct := strings.ToLower(contentType)
-	// Strip parameters (e.g., "; charset=utf-8") and any leading whitespace.
-	if i := strings.Index(ct, ";"); i >= 0 {
-		ct = ct[:i]
+	limit := req.ContentLength
+	if maxSize > 0 && limit > int64(maxSize) {
+		limit = int64(maxSize)
 	}
-	ct = strings.TrimSpace(ct)
-
-	switch {
-	case ct == "application/json" || strings.HasSuffix(ct, "+json"):
-		var v interface{}
-		if err := json.Unmarshal(body, &v); err != nil {
-			return body
-		}
-		redacted := redactJSON(v)
-		out, err := json.Marshal(redacted)
-		if err != nil {
-			return body
-		}
-		return out
-
-	case ct == "application/x-www-form-urlencoded":
-		values, err := url.ParseQuery(string(body))
-		if err != nil {
-			return body
-		}
-		for k := range values {
-			if sensitiveBodyFields[strings.ToLower(k)] {
-				values.Set(k, redactedPlaceholder)
-			}
-		}
-		return []byte(values.Encode())
-	}
-
+	orig := req.Body
+	body.data, _ = io.ReadAll(io.LimitReader(orig, limit))
+	req.Body = replayBody{Reader: io.MultiReader(bytes.NewReader(body.data), orig), Closer: orig}
 	return body
 }
 
-// redactJSON walks a decoded JSON value and replaces values of sensitive
-// fields with the redaction placeholder. Maps and slices are descended into.
-func redactJSON(v interface{}) interface{} {
-	switch t := v.(type) {
-	case map[string]interface{}:
-		for k, val := range t {
-			if sensitiveBodyFields[strings.ToLower(k)] {
-				t[k] = redactedPlaceholder
-				continue
-			}
-			t[k] = redactJSON(val)
-		}
-		return t
-	case []interface{}:
-		for i, val := range t {
-			t[i] = redactJSON(val)
-		}
-		return t
-	}
-	return v
+// replayBody is a request body that yields buffered bytes before the rest of
+// the original stream, and closes the original.
+type replayBody struct {
+	io.Reader
+	io.Closer
 }
 
 // newErrorMiddleware creates a Gin middleware that recovers from panics, captures
@@ -150,15 +67,9 @@ func newErrorMiddleware(p *Pulse) gin.HandlerFunc {
 
 	return func(c *gin.Context) {
 		// Capture request body early if configured (before it's consumed by handlers)
-		var bodyBytes []byte
+		var body capturedBody
 		if boolValue(cfg.CaptureRequestBody) && c.Request.Body != nil && c.Request.ContentLength > 0 {
-			maxSize := int64(cfg.MaxBodySize)
-			if c.Request.ContentLength < maxSize {
-				maxSize = c.Request.ContentLength
-			}
-			bodyBytes, _ = io.ReadAll(io.LimitReader(c.Request.Body, maxSize))
-			// Restore the body so handlers can still read it
-			c.Request.Body = io.NopCloser(strings.NewReader(string(bodyBytes)))
+			body = captureBody(c.Request, cfg.MaxBodySize)
 		}
 
 		// Panic recovery
@@ -184,7 +95,7 @@ func newErrorMiddleware(p *Pulse) gin.HandlerFunc {
 					errMsg,
 					ErrorTypePanic,
 					stack,
-					captureRequestContext(c, bodyBytes),
+					captureRequestContext(c, body),
 					traceID,
 				)
 
@@ -226,7 +137,7 @@ func newErrorMiddleware(p *Pulse) gin.HandlerFunc {
 					errMsg,
 					errType,
 					stack,
-					captureRequestContext(c, bodyBytes),
+					captureRequestContext(c, body),
 					traceID,
 				)
 
@@ -253,7 +164,7 @@ func newErrorMiddleware(p *Pulse) gin.HandlerFunc {
 				errMsg,
 				errType,
 				stack,
-				captureRequestContext(c, bodyBytes),
+				captureRequestContext(c, body),
 				traceID,
 			)
 
@@ -394,13 +305,14 @@ func shouldSkipFrame(fn string) bool {
 	return false
 }
 
-// captureRequestContext builds a RequestContext from the Gin context with sensitive data redacted.
-func captureRequestContext(c *gin.Context, bodyBytes []byte) *RequestContext {
+// captureRequestContext builds a RequestContext from the Gin context with
+// sensitive headers, query parameters and body fields redacted.
+func captureRequestContext(c *gin.Context, body capturedBody) *RequestContext {
 	headers := make(map[string]string)
 	for key, values := range c.Request.Header {
 		lowerKey := strings.ToLower(key)
 		if sensitiveHeaders[lowerKey] {
-			headers[key] = "[REDACTED]"
+			headers[key] = redactedPlaceholder
 		} else if len(values) > 0 {
 			headers[key] = values[0]
 		}
@@ -409,15 +321,19 @@ func captureRequestContext(c *gin.Context, bodyBytes []byte) *RequestContext {
 	reqCtx := &RequestContext{
 		Method:      c.Request.Method,
 		Path:        c.Request.URL.Path,
-		Query:       c.Request.URL.RawQuery,
+		Query:       redactQuery(c.Request.URL.RawQuery),
 		Headers:     headers,
 		ClientIP:    c.ClientIP(),
 		UserAgent:   c.Request.UserAgent(),
 		ContentType: c.ContentType(),
 	}
 
-	if len(bodyBytes) > 0 {
-		reqCtx.Body = string(redactBody(c.ContentType(), bodyBytes))
+	switch {
+	case body.omitted:
+		reqCtx.Body = omittedBodyMarker(body.size, reqCtx.ContentType)
+	case len(body.data) > 0:
+		reqCtx.Body = string(redactBody(reqCtx.ContentType, body.data))
+		reqCtx.BodyTruncated = int64(len(body.data)) < body.size
 	}
 
 	return reqCtx

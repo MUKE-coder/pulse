@@ -25,7 +25,7 @@ type HealthResponse struct {
 	Status    string                         `json:"status"`
 	Timestamp time.Time                      `json:"timestamp"`
 	Uptime    string                         `json:"uptime"`
-	Checks   map[string]HealthCheckResponse  `json:"checks,omitempty"`
+	Checks    map[string]HealthCheckResponse `json:"checks,omitempty"`
 }
 
 // HealthCheckResponse is one check's status in the health endpoint.

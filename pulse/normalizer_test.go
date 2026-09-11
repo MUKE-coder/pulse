@@ -4,11 +4,11 @@ import "testing"
 
 func TestNormalizeSQL(t *testing.T) {
 	tests := []struct {
-		name       string
-		input      string
-		wantNorm   string
-		wantOp     string
-		wantTable  string
+		name      string
+		input     string
+		wantNorm  string
+		wantOp    string
+		wantTable string
 	}{
 		{
 			name:      "simple select with number",
