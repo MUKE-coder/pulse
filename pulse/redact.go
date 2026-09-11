@@ -3,15 +3,18 @@ package pulse
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 )
 
-// Redaction helpers shared by error capture (request headers, query string,
-// body) and dependency tracking (outbound URLs).
+// Redaction of secrets from what Pulse stores: request headers, query
+// string, body and path, error messages, and outbound dependency URLs.
 //
 // Everything here fails closed: when Pulse cannot confidently strip secrets
 // from a value, it stores a size marker instead of the value.
@@ -23,69 +26,177 @@ const redactedPlaceholder = "[REDACTED]"
 // after the cut-off point is emitted.
 const truncatedMarker = " …[truncated]"
 
-// sensitiveHeaders are header names (lowercase) whose values are redacted in
-// captured request context.
-var sensitiveHeaders = map[string]bool{
-	"authorization":        true,
-	"cookie":               true,
-	"set-cookie":           true,
-	"x-api-key":            true,
-	"x-auth-token":         true,
-	"x-access-token":       true,
-	"x-refresh-token":      true,
-	"x-csrf-token":         true,
-	"x-xsrf-token":         true,
-	"x-amz-security-token": true,
-	"x-goog-api-key":       true,
-	"proxy-authorization":  true,
+// defaultSensitiveHeaders are redacted in captured request context.
+var defaultSensitiveHeaders = []string{
+	"authorization", "cookie", "set-cookie", "proxy-authorization",
+	"x-api-key", "x-auth-token", "x-access-token", "x-refresh-token",
+	"x-csrf-token", "x-xsrf-token", "x-amz-security-token", "x-goog-api-key",
 }
 
-// sensitiveFieldNames are matched exactly against a normalized field name
-// (see normalizeFieldName), so "cc_number", "ccNumber" and "cc-number" all
-// match "ccnumber". Short or ambiguous names belong here rather than in
-// sensitiveFieldStems.
-var sensitiveFieldNames = map[string]bool{
-	"pass":          true,
-	"pin":           true,
-	"auth":          true,
-	"authorization": true,
-	"ssn":           true,
-	"cvc":           true,
-	"cvv":           true,
-	"ccnumber":      true,
-	"otp":           true,
-	"sessionid":     true,
+// defaultSensitiveFieldNames are matched exactly against a normalized field
+// name (see normalizeFieldName), so "cc_number", "ccNumber" and "cc-number"
+// all match "ccnumber". Short or ambiguous names belong here rather than in
+// defaultSensitiveFieldStems.
+var defaultSensitiveFieldNames = []string{
+	"pass", "pin", "auth", "authorization", "ssn", "cvc", "cvv", "ccnumber", "otp", "sessionid",
 }
 
-// sensitiveFieldStems are matched as substrings of a normalized field name,
-// so "newPassword", "stripe_token" and "X-Amz-Signature" are all caught.
-// Only long, high-signal stems belong here — short ones like "pin" or "ssn"
-// would match unrelated fields ("spinner", "classname").
-var sensitiveFieldStems = []string{
-	"password",
-	"passwd",
-	"secret",
-	"token",
-	"apikey",
-	"credential",
-	"privatekey",
-	"cardnumber",
-	"signature",
+// defaultSensitiveFieldStems are matched as substrings of a normalized field
+// name, so "newPassword", "stripe_token" and "X-Amz-Signature" are all
+// caught. Only long, high-signal stems belong here — short ones like "pin"
+// or "ssn" would match unrelated fields ("spinner", "classname").
+var defaultSensitiveFieldStems = []string{
+	"password", "passwd", "secret", "token", "apikey", "credential", "privatekey", "cardnumber", "signature",
 }
 
-// isSensitiveField reports whether values of the named body field, form key
+// valueDetector finds one kind of secret inside free text.
+type valueDetector struct {
+	re *regexp.Regexp
+	// replace returns the replacement for a match, or false to keep it.
+	replace func(match string) (string, bool)
+}
+
+func fixedReplacement(s string) func(string) (string, bool) {
+	return func(string) (string, bool) { return s, true }
+}
+
+// defaultValueDetectors catch secrets whatever field they appear in.
+var defaultValueDetectors = []valueDetector{
+	{regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)`),
+		fixedReplacement("[REDACTED:private-key]")},
+	{regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}`),
+		fixedReplacement("[REDACTED:jwt]")},
+	{regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}`),
+		fixedReplacement("Bearer [REDACTED]")},
+	{regexp.MustCompile(`\b(?:AKIA|ASIA)[0-9A-Z]{16}\b`),
+		fixedReplacement("[REDACTED:aws-key]")},
+	// Card numbers: 13–19 digits, optionally grouped by spaces or dashes,
+	// starting 3–6 (every major network) and passing the Luhn check. The
+	// leading digit keeps millisecond timestamps (17…) out.
+	{regexp.MustCompile(`\b[3-6](?:[ -]?\d){12,18}\b`), redactCardNumber},
+}
+
+func redactCardNumber(match string) (string, bool) {
+	digits := make([]byte, 0, 19)
+	for i := 0; i < len(match); i++ {
+		if c := match[i]; c >= '0' && c <= '9' {
+			digits = append(digits, c-'0')
+		}
+	}
+	if len(digits) < 13 || len(digits) > 19 || !luhnValid(digits) {
+		return match, false
+	}
+	return "[REDACTED:card]", true
+}
+
+func luhnValid(digits []byte) bool {
+	sum, double := 0, false
+	for i := len(digits) - 1; i >= 0; i-- {
+		v := int(digits[i])
+		if double {
+			if v *= 2; v > 9 {
+				v -= 9
+			}
+		}
+		sum += v
+		double = !double
+	}
+	return sum%10 == 0
+}
+
+// redactor applies one compiled set of redaction rules.
+type redactor struct {
+	headers map[string]bool // lowercase header names
+	names   map[string]bool // normalized exact field names
+	stems   []string        // normalized field-name substrings
+	values  []valueDetector
+	hook    func(*RequestContext)
+}
+
+// defaultRedactor applies only the built-in rules.
+var defaultRedactor = newRedactor(RedactionConfig{})
+
+func newRedactor(cfg RedactionConfig) *redactor {
+	r := &redactor{headers: make(map[string]bool), names: make(map[string]bool), hook: cfg.Hook}
+	if !cfg.DisableDefaults {
+		for _, h := range defaultSensitiveHeaders {
+			r.headers[h] = true
+		}
+		for _, n := range defaultSensitiveFieldNames {
+			r.names[n] = true
+		}
+		r.stems = append(r.stems, defaultSensitiveFieldStems...)
+		r.values = append(r.values, defaultValueDetectors...)
+	}
+	for _, h := range cfg.Headers {
+		r.headers[strings.ToLower(h)] = true
+	}
+	for _, n := range cfg.Fields {
+		if n := normalizeFieldName(n); n != "" {
+			r.names[n] = true
+		}
+	}
+	for _, s := range cfg.FieldContains {
+		if s := normalizeFieldName(s); s != "" {
+			r.stems = append(r.stems, s)
+		}
+	}
+	for _, re := range cfg.ValuePatterns {
+		if re != nil {
+			r.values = append(r.values, valueDetector{re, fixedReplacement(redactedPlaceholder)})
+		}
+	}
+	return r
+}
+
+// sensitiveField reports whether values of the named body field, form key
 // or query parameter should be redacted.
-func isSensitiveField(name string) bool {
+func (r *redactor) sensitiveField(name string) bool {
 	n := normalizeFieldName(name)
-	if sensitiveFieldNames[n] {
+	if r.names[n] {
 		return true
 	}
-	for _, stem := range sensitiveFieldStems {
+	for _, stem := range r.stems {
 		if strings.Contains(n, stem) {
 			return true
 		}
 	}
 	return false
+}
+
+func (r *redactor) sensitiveHeader(name string) bool {
+	return r.headers[strings.ToLower(name)]
+}
+
+// scrubValue replaces every secret the value detectors find in s.
+func (r *redactor) scrubValue(s string) string {
+	if s == "" {
+		return s
+	}
+	for _, d := range r.values {
+		s = d.re.ReplaceAllStringFunc(s, func(m string) string {
+			if rep, ok := d.replace(m); ok {
+				return rep
+			}
+			return m
+		})
+	}
+	return s
+}
+
+// headerMap flattens h to its first values, redacting sensitive headers and
+// scrubbing the rest.
+func (r *redactor) headerMap(h http.Header) map[string]string {
+	out := make(map[string]string, len(h))
+	for key, values := range h {
+		switch {
+		case r.sensitiveHeader(key):
+			out[key] = redactedPlaceholder
+		case len(values) > 0:
+			out[key] = r.scrubValue(values[0])
+		}
+	}
+	return out
 }
 
 // normalizeFieldName lowercases name and drops '_', '-' and '.', so naming
@@ -118,7 +229,7 @@ func mediaType(contentType string) string {
 
 // redactableContentType reports whether Pulse knows how to redact a body of
 // this content type. A missing Content-Type counts, because many clients send
-// JSON without one; redactBody sniffs such bodies.
+// JSON without one; body sniffs such bodies.
 func redactableContentType(contentType string) bool {
 	switch ct := mediaType(contentType); {
 	case ct == "", ct == "application/json", strings.HasSuffix(ct, "+json"),
@@ -128,24 +239,25 @@ func redactableContentType(contentType string) bool {
 	return false
 }
 
-// redactBody returns a copy of body that is safe to store:
+// body returns a copy of a request body that is safe to store:
 //
 //   - JSON (application/json, */*+json, or no Content-Type but JSON-shaped):
-//     the value of every sensitive key is replaced, at any depth. Works on
-//     truncated and malformed documents — see redactJSONBody.
-//   - application/x-www-form-urlencoded: sensitive keys are replaced.
+//     the value of every sensitive key is replaced, at any depth, and other
+//     string values are scrubbed. Works on truncated and malformed
+//     documents — see jsonBody.
+//   - application/x-www-form-urlencoded: as for a query string.
 //   - anything else: replaced wholesale by a size marker.
-func redactBody(contentType string, body []byte) []byte {
+func (r *redactor) body(contentType string, body []byte) []byte {
 	if len(body) == 0 {
 		return body
 	}
 	switch ct := mediaType(contentType); {
 	case ct == "application/json" || strings.HasSuffix(ct, "+json"):
-		return redactJSONBody(body)
+		return r.jsonBody(body)
 	case ct == "application/x-www-form-urlencoded":
-		return []byte(redactQuery(string(body)))
+		return []byte(r.query(string(body)))
 	case ct == "" && looksLikeJSON(body):
-		return redactJSONBody(body)
+		return r.jsonBody(body)
 	}
 	return []byte(omittedBodyMarker(int64(len(body)), contentType))
 }
@@ -164,14 +276,15 @@ func looksLikeJSON(body []byte) bool {
 	return len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[')
 }
 
-// redactJSONBody re-emits body token by token, replacing the value of every
-// sensitive key — scalar or whole object/array — with the placeholder.
+// jsonBody re-emits body token by token, replacing the value of every
+// sensitive key — scalar or whole object/array — with the placeholder, and
+// scrubbing every other string value.
 //
 // Streaming (rather than decode-then-marshal) keeps the original key order
 // and, crucially, still works on a body cut off at MaxBodySize or otherwise
 // malformed: everything before the problem is emitted redacted, then
 // truncatedMarker, and nothing after it.
-func redactJSONBody(body []byte) []byte {
+func (r *redactor) jsonBody(body []byte) []byte {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
 
@@ -237,7 +350,7 @@ func redactJSONBody(body []byte) []byte {
 				writeJSONString(&out, key)
 				out.WriteByte(':')
 				top.wantKey = false
-				redactNext = isSensitiveField(key)
+				redactNext = r.sensitiveField(key)
 				continue
 			}
 		}
@@ -258,7 +371,7 @@ func redactJSONBody(body []byte) []byte {
 			out.WriteByte(byte(t))
 			stack = append(stack, frame{object: t == '{', wantKey: t == '{'})
 		case string:
-			writeJSONString(&out, t)
+			writeJSONString(&out, r.scrubValue(t))
 			valueDone()
 		case json.Number:
 			out.WriteString(t.String())
@@ -282,18 +395,23 @@ func writeJSONString(b *bytes.Buffer, s string) {
 	b.Truncate(b.Len() - 1) // drop Encode's trailing newline
 }
 
-// redactQuery redacts the values of sensitive keys in a URL query string or
-// form-encoded body. Pair order and the original encoding of everything it
-// leaves alone are preserved. Pairs are handled independently, so a
-// malformed or truncated pair never causes the rest to be kept raw.
-func redactQuery(raw string) string {
+// readableEscape percent-encodes s for a query string but leaves the
+// characters of redaction markers readable.
+var readableEscape = strings.NewReplacer("%5B", "[", "%5D", "]", "%3A", ":")
+
+// query redacts the values of sensitive keys in a URL query string or
+// form-encoded body, and scrubs the other values. Pair order and the
+// original encoding of everything it leaves alone are preserved. Pairs are
+// handled independently, so a malformed or truncated pair never causes the
+// rest to be kept raw.
+func (r *redactor) query(raw string) string {
 	if raw == "" {
 		return raw
 	}
 	pairs := strings.Split(raw, "&")
 	changed := false
 	for i, pair := range pairs {
-		key, _, hasValue := strings.Cut(pair, "=")
+		key, value, hasValue := strings.Cut(pair, "=")
 		if !hasValue {
 			continue
 		}
@@ -301,8 +419,17 @@ func redactQuery(raw string) string {
 		if err != nil {
 			name = key
 		}
-		if isSensitiveField(name) {
+		if r.sensitiveField(name) {
 			pairs[i] = key + "=" + redactedPlaceholder
+			changed = true
+			continue
+		}
+		decoded, err := url.QueryUnescape(value)
+		if err != nil {
+			decoded = value
+		}
+		if scrubbed := r.scrubValue(decoded); scrubbed != decoded {
+			pairs[i] = key + "=" + readableEscape.Replace(url.QueryEscape(scrubbed))
 			changed = true
 		}
 	}
@@ -312,13 +439,80 @@ func redactQuery(raw string) string {
 	return strings.Join(pairs, "&")
 }
 
-// redactURL renders u for storage with sensitive query parameters redacted
-// and any userinfo password masked.
-func redactURL(u *url.URL) string {
+// url renders u for storage with sensitive query parameters redacted, other
+// values and the path scrubbed, and any userinfo password masked.
+func (r *redactor) url(u *url.URL) string {
 	if u == nil {
 		return ""
 	}
 	cp := *u
-	cp.RawQuery = redactQuery(cp.RawQuery)
+	cp.RawQuery = r.query(cp.RawQuery)
+	if scrubbed := r.scrubValue(cp.Path); scrubbed != cp.Path {
+		cp.Path, cp.RawPath = scrubbed, ""
+	}
 	return cp.Redacted()
+}
+
+// errorText renders err for storage. An HTTP client error (*url.Error)
+// embeds the full request URL, query-string credentials included, so it is
+// rebuilt around the redacted URL; the result is then scrubbed.
+func (r *redactor) errorText(err error) string {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		cp := *ue
+		if u, perr := url.Parse(ue.URL); perr == nil {
+			cp.URL = r.url(u)
+		} else {
+			cp.URL = "[unparseable URL]"
+		}
+		// Replace the url.Error in the message: its text is a prefix of the
+		// wrapped error's text only when err is the url.Error itself.
+		if err == error(ue) {
+			return r.scrubValue(cp.Error())
+		}
+		return r.scrubValue(strings.Replace(err.Error(), ue.Error(), cp.Error(), 1))
+	}
+	return r.scrubValue(err.Error())
+}
+
+// finishRecord applies the final redaction to an error record before it is
+// stored or broadcast: the error message is scrubbed — and the fingerprint
+// recomputed from the scrubbed message, so embedded values don't split one
+// error into many groups — then the user hook runs on the request context.
+func (r *redactor) finishRecord(rec *ErrorRecord) {
+	if msg := r.scrubValue(rec.ErrorMessage); msg != rec.ErrorMessage {
+		rec.ErrorMessage = msg
+		rec.Fingerprint = generateFingerprint(rec.Method, rec.Route, msg)
+	}
+	if r.hook != nil && rec.RequestContext != nil {
+		r.runHook(rec)
+	}
+}
+
+// runHook calls the user hook, reducing the context to method and path if
+// it panics — failing closed rather than storing what it was meant to clean.
+func (r *redactor) runHook(rec *ErrorRecord) {
+	defer func() {
+		if recover() != nil {
+			rec.RequestContext = &RequestContext{Method: rec.RequestContext.Method, Path: rec.RequestContext.Path}
+		}
+	}()
+	r.hook(rec.RequestContext)
+}
+
+// rescrub re-applies redaction to a stored request context — used to clean
+// records written by earlier versions.
+func (r *redactor) rescrub(rc *RequestContext) {
+	for k, v := range rc.Headers {
+		if r.sensitiveHeader(k) {
+			rc.Headers[k] = redactedPlaceholder
+		} else {
+			rc.Headers[k] = r.scrubValue(v)
+		}
+	}
+	rc.Path = r.scrubValue(rc.Path)
+	rc.Query = r.query(rc.Query)
+	if rc.Body != "" && !strings.HasPrefix(rc.Body, "[body omitted") {
+		rc.Body = string(r.body(rc.ContentType, []byte(rc.Body)))
+	}
 }

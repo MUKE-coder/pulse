@@ -46,18 +46,42 @@ type MemoryStorage struct {
 	testRuns   []TestRun
 	testRunsMu sync.RWMutex
 
+	// Lifecycle (process start/stop) events; see lifecycle.go.
+	lifecycle   []lifecycleEvent
+	lifecycleMu sync.Mutex
+
 	// Config
 	appName   string
 	startTime time.Time
 }
 
+// Caps on the Memory backend's slices; the oldest records are dropped beyond
+// these.
+const (
+	maxStoredAlerts   = 10000
+	maxStoredN1       = 1000
+	maxStoredTestRuns = 1000
+)
+
 // NewMemoryStorage creates a new in-memory storage with default ring buffer capacities.
 func NewMemoryStorage(appName string) *MemoryStorage {
+	return newMemoryStorage(appName, MemoryCapacity{})
+}
+
+// newMemoryStorage creates a Memory backend with the given ring-buffer sizes;
+// zero fields keep the defaults.
+func newMemoryStorage(appName string, c MemoryCapacity) *MemoryStorage {
+	size := func(n, def int) int {
+		if n > 0 {
+			return n
+		}
+		return def
+	}
 	return &MemoryStorage{
-		requests:      NewRingBuffer[RequestMetric](defaultRequestCapacity),
-		queries:       NewRingBuffer[QueryMetric](defaultQueryCapacity),
-		runtimeStats:  NewRingBuffer[RuntimeMetric](defaultRuntimeCapacity),
-		dependencies:  NewRingBuffer[DependencyMetric](defaultDependencyCapacity),
+		requests:      NewRingBuffer[RequestMetric](size(c.Requests, defaultRequestCapacity)),
+		queries:       NewRingBuffer[QueryMetric](size(c.Queries, defaultQueryCapacity)),
+		runtimeStats:  NewRingBuffer[RuntimeMetric](size(c.Runtime, defaultRuntimeCapacity)),
+		dependencies:  NewRingBuffer[DependencyMetric](size(c.Dependencies, defaultDependencyCapacity)),
 		errors:        make(map[string]*ErrorRecord),
 		healthResults: make(map[string]*RingBuffer[HealthCheckResult]),
 		alerts:        make([]AlertRecord, 0),
@@ -296,8 +320,8 @@ func (s *MemoryStorage) StoreN1Detection(d N1Detection) error {
 	s.n1Mu.Lock()
 	defer s.n1Mu.Unlock()
 	s.n1Detections = append(s.n1Detections, d)
-	if len(s.n1Detections) > 1000 {
-		s.n1Detections = s.n1Detections[len(s.n1Detections)-1000:]
+	if len(s.n1Detections) > maxStoredN1 {
+		s.n1Detections = s.n1Detections[len(s.n1Detections)-maxStoredN1:]
 	}
 	return nil
 }
@@ -512,9 +536,8 @@ func (s *MemoryStorage) StoreAlert(a AlertRecord) error {
 		}
 	}
 	s.alerts = append(s.alerts, a)
-	// Cap at 10000
-	if len(s.alerts) > 10000 {
-		s.alerts = s.alerts[len(s.alerts)-10000:]
+	if len(s.alerts) > maxStoredAlerts {
+		s.alerts = s.alerts[len(s.alerts)-maxStoredAlerts:]
 	}
 	return nil
 }
@@ -654,9 +677,8 @@ func (s *MemoryStorage) StoreTestRun(r TestRun) error {
 		}
 	}
 	s.testRuns = append(s.testRuns, r)
-	const cap = 1000
-	if len(s.testRuns) > cap {
-		s.testRuns = s.testRuns[len(s.testRuns)-cap:]
+	if len(s.testRuns) > maxStoredTestRuns {
+		s.testRuns = s.testRuns[len(s.testRuns)-maxStoredTestRuns:]
 	}
 	return nil
 }

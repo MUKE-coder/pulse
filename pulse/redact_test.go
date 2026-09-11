@@ -19,8 +19,8 @@ func TestIsSensitiveField(t *testing.T) {
 		"cvv", "cvc", "ssn", "otp", "session_id", "X-Amz-Signature",
 	}
 	for _, name := range sensitive {
-		if !isSensitiveField(name) {
-			t.Errorf("isSensitiveField(%q) = false, want true", name)
+		if !defaultRedactor.sensitiveField(name) {
+			t.Errorf("defaultRedactor.sensitiveField(%q) = false, want true", name)
 		}
 	}
 	benign := []string{
@@ -28,8 +28,8 @@ func TestIsSensitiveField(t *testing.T) {
 		"classname", "key", "page", "id", "amount", "passenger",
 	}
 	for _, name := range benign {
-		if isSensitiveField(name) {
-			t.Errorf("isSensitiveField(%q) = true, want false", name)
+		if defaultRedactor.sensitiveField(name) {
+			t.Errorf("defaultRedactor.sensitiveField(%q) = true, want false", name)
 		}
 	}
 }
@@ -97,8 +97,8 @@ func TestRedactJSONBody(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := string(redactJSONBody([]byte(tc.in))); got != tc.want {
-				t.Errorf("redactJSONBody(%s)\n got %s\nwant %s", tc.in, got, tc.want)
+			if got := string(defaultRedactor.jsonBody([]byte(tc.in))); got != tc.want {
+				t.Errorf("defaultRedactor.jsonBody(%s)\n got %s\nwant %s", tc.in, got, tc.want)
 			}
 		})
 	}
@@ -106,7 +106,7 @@ func TestRedactJSONBody(t *testing.T) {
 
 func TestRedactJSONBody_MalformedIsCutOff(t *testing.T) {
 	t.Parallel()
-	got := string(redactJSONBody([]byte(`{"name" "bob","password":"hunter2"}`)))
+	got := string(defaultRedactor.jsonBody([]byte(`{"name" "bob","password":"hunter2"}`)))
 	if !strings.HasSuffix(got, truncatedMarker) {
 		t.Errorf("malformed JSON should end with the truncation marker, got %q", got)
 	}
@@ -125,7 +125,7 @@ func TestRedactJSONBody_TruncationNeverLeaks(t *testing.T) {
 		`"tags":["a","b"],"api_key":"AKIA-SECRET-KEY","auth":{"otp":"99887766"}}`
 	secrets := []string{"S3C", "4111", "AKIA", "9988"}
 	for cut := 0; cut <= len(doc); cut++ {
-		out := string(redactJSONBody([]byte(doc[:cut])))
+		out := string(defaultRedactor.jsonBody([]byte(doc[:cut])))
 		for _, s := range secrets {
 			if strings.Contains(out, s) {
 				t.Fatalf("cut at byte %d leaked %q: %s", cut, s, out)
@@ -138,7 +138,7 @@ func TestRedactQuery_TruncationNeverLeaks(t *testing.T) {
 	t.Parallel()
 	form := "username=bob&password=S3CR3T-PASSWORD&card_number=4111111111111111&note=hi"
 	for cut := 0; cut <= len(form); cut++ {
-		out := redactQuery(form[:cut])
+		out := defaultRedactor.query(form[:cut])
 		if strings.Contains(out, "S3C") || strings.Contains(out, "4111") {
 			t.Fatalf("cut at byte %d leaked a secret: %s", cut, out)
 		}
@@ -163,8 +163,8 @@ func TestRedactBody_ContentTypes(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := string(redactBody(tc.contentType, tc.body)); got != tc.want {
-				t.Errorf("redactBody(%q) = %q, want %q", tc.contentType, got, tc.want)
+			if got := string(defaultRedactor.body(tc.contentType, tc.body)); got != tc.want {
+				t.Errorf("defaultRedactor.body(%q) = %q, want %q", tc.contentType, got, tc.want)
 			}
 		})
 	}
@@ -183,8 +183,8 @@ func TestRedactQuery(t *testing.T) {
 		{"password=a&password=b", "password=[REDACTED]&password=[REDACTED]"},
 	}
 	for _, tc := range cases {
-		if got := redactQuery(tc.in); got != tc.want {
-			t.Errorf("redactQuery(%q) = %q, want %q", tc.in, got, tc.want)
+		if got := defaultRedactor.query(tc.in); got != tc.want {
+			t.Errorf("defaultRedactor.query(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }

@@ -1,6 +1,9 @@
 package pulse
 
-import "time"
+import (
+	"regexp"
+	"time"
+)
 
 // Option configures Pulse during Mount. Options are applied in order over a
 // base [DefaultConfig], so later options override earlier ones.
@@ -27,6 +30,12 @@ func WithAppName(name string) Option {
 // WithPrefix overrides the URL prefix Pulse mounts under (default "/pulse").
 func WithPrefix(prefix string) Option {
 	return func(c *Config) { c.Prefix = prefix }
+}
+
+// WithInstanceID sets the identifier this process records in lifecycle
+// (start/stop) events. Defaults to the hostname.
+func WithInstanceID(id string) Option {
+	return func(c *Config) { c.InstanceID = id }
 }
 
 // WithDevMode enables verbose logging and faster background cycles.
@@ -77,6 +86,12 @@ func WithLoginRateLimit(perMinute int) Option {
 // sweeper drops it.
 func WithRetention(hours int) Option {
 	return func(c *Config) { c.Storage.RetentionHours = hours }
+}
+
+// WithMemoryCapacity sizes the Memory backend's ring buffers. Zero fields
+// keep the defaults.
+func WithMemoryCapacity(c MemoryCapacity) Option {
+	return func(cfg *Config) { cfg.Storage.MemoryCapacity = c }
 }
 
 // WithMemoryStorage selects the in-memory ring-buffer backend (this is the
@@ -159,6 +174,34 @@ func WithGoroutineLeakThreshold(n int) Option {
 // redactor.
 func WithRequestBodyCaptureDisabled() Option {
 	return func(c *Config) { c.Errors.CaptureRequestBody = boolPtr(false) }
+}
+
+// WithRedactFields adds field names whose values are always redacted from
+// captured JSON bodies, form bodies and query strings. Multiple calls
+// accumulate. See [RedactionConfig.Fields].
+func WithRedactFields(names ...string) Option {
+	return func(c *Config) { c.Errors.Redaction.Fields = append(c.Errors.Redaction.Fields, names...) }
+}
+
+// WithRedactHeaders adds header names whose values are redacted. Multiple
+// calls accumulate.
+func WithRedactHeaders(names ...string) Option {
+	return func(c *Config) { c.Errors.Redaction.Headers = append(c.Errors.Redaction.Headers, names...) }
+}
+
+// WithRedactValuePatterns adds patterns redacted wherever they appear in
+// captured values and error messages. Multiple calls accumulate. See
+// [RedactionConfig.ValuePatterns].
+func WithRedactValuePatterns(patterns ...*regexp.Regexp) Option {
+	return func(c *Config) {
+		c.Errors.Redaction.ValuePatterns = append(c.Errors.Redaction.ValuePatterns, patterns...)
+	}
+}
+
+// WithRedactor sets a hook that runs last on every captured request context
+// and may modify it. See [RedactionConfig.Hook].
+func WithRedactor(hook func(*RequestContext)) Option {
+	return func(c *Config) { c.Errors.Redaction.Hook = hook }
 }
 
 // WithMaxBodySize sets the cap on captured request body size in bytes.

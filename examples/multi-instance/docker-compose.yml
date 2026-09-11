@@ -1,0 +1,46 @@
+# Two API replicas behind Caddy.
+#
+#   PULSE_SECRET=$(openssl rand -hex 32) PULSE_PASSWORD=change-me docker compose up --build
+#
+# Then open http://localhost:8080/pulse/ and log in as admin. Every replica
+# accepts the same dashboard token because they share PULSE_SECRET.
+# `curl localhost:8080/api/hello` alternates between api1 and api2.
+#
+# Each replica keeps its own SQLite file, so each dashboard shows only that
+# replica's traffic; Caddy pins each browser's dashboard session to one
+# replica. A shared storage backend is planned for Pulse v1.2.
+
+x-api: &api
+  build:
+    context: ../..
+    dockerfile: examples/multi-instance/Dockerfile
+  environment: &api-env
+    PULSE_SECRET: ${PULSE_SECRET:?set PULSE_SECRET to one random value shared by every replica}
+    PULSE_USER: admin
+    PULSE_PASSWORD: ${PULSE_PASSWORD:?set PULSE_PASSWORD}
+    PULSE_DB: /data/pulse.db
+
+services:
+  api1:
+    <<: *api
+    environment:
+      <<: *api-env
+      INSTANCE_ID: api1
+    volumes: ["api1-data:/data"]
+
+  api2:
+    <<: *api
+    environment:
+      <<: *api-env
+      INSTANCE_ID: api2
+    volumes: ["api2-data:/data"]
+
+  caddy:
+    image: caddy:2
+    ports: ["8080:80"]
+    volumes: ["./Caddyfile:/etc/caddy/Caddyfile:ro"]
+    depends_on: [api1, api2]
+
+volumes:
+  api1-data: {}
+  api2-data: {}

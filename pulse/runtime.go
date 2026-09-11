@@ -111,9 +111,7 @@ func (rs *RuntimeSampler) sample() {
 	}
 
 	// Store (fire-and-forget, don't block sampler)
-	if err := rs.pulse.storage.StoreRuntime(metric); err != nil && rs.pulse.config.DevMode {
-		rs.pulse.logger.Printf("[pulse] failed to store runtime metric: %v", err)
-	}
+	rs.pulse.internalError("storage: runtime", rs.pulse.storage.StoreRuntime(metric))
 
 	// Broadcast runtime metrics to WebSocket clients
 	rs.pulse.BroadcastRuntime(metric)

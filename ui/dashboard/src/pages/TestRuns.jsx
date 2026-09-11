@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react'
 import { useAPI } from '../hooks/useAPI'
+import { isZeroTime } from '../components/TimelineOverlays'
 
 // Test runs page. Backend: GET /pulse/api/test-runs?range=… returns []TestRun
-// (pulse/metrics.go TestRun type).
+// (pulse/metrics.go TestRun type); GET /pulse/api/test-runs/:id/compare
+// returns the before/during/after comparison (pulse/testrun_compare.go).
 
 const RANGES = [
   { label: '1h', value: '1h' },
@@ -18,7 +20,7 @@ function fmtDuration(ms) {
 }
 
 function fmtTime(iso) {
-  if (!iso) return '—'
+  if (isZeroTime(iso)) return '—'
   return new Date(iso).toLocaleString()
 }
 
@@ -27,6 +29,7 @@ export default function TestRuns() {
   const [runs, setRuns] = useState([])
   const [range, setRange] = useState('24h')
   const [loading, setLoading] = useState(true)
+  const [open, setOpen] = useState(null) // run ID whose comparison is shown
 
   useEffect(() => {
     let alive = true
@@ -64,6 +67,7 @@ export default function TestRuns() {
       <p className="text-slate-500 text-xs mb-5">
         Recorded by load-test harnesses via <code className="text-indigo-300">POST /pulse/api/test-runs</code>.
         The bundled <code className="text-indigo-300">examples/k6/pulse-k6-bridge.js</code> wires this up for k6 in three lines.
+        Runs also appear as shaded bands on the Dashboard charts.
       </p>
 
       {loading && <div className="text-slate-500 py-10">Loading…</div>}
@@ -71,7 +75,7 @@ export default function TestRuns() {
       {!loading && runs.length === 0 && (
         <div className="bg-slate-900/60 border border-slate-800 rounded-lg p-5 text-sm text-slate-400">
           No test runs recorded in the selected window. Once a k6 (or other) harness POSTs
-          a run, it will appear here.
+          a run, it will appear here and as a band on the Dashboard charts.
         </div>
       )}
 
@@ -85,14 +89,15 @@ export default function TestRuns() {
                 <th className="px-3 py-2 text-left font-medium">Started</th>
                 <th className="px-3 py-2 text-left font-medium">Duration</th>
                 <th className="px-3 py-2 text-left font-medium">Metadata</th>
+                <th className="px-3 py-2" />
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800">
               {runs.map((r) => {
                 const startedMs = new Date(r.started_at).getTime()
-                const endedMs = r.ended_at ? new Date(r.ended_at).getTime() : Date.now()
-                const inFlight = !r.ended_at
-                return (
+                const inFlight = isZeroTime(r.ended_at)
+                const endedMs = inFlight ? Date.now() : new Date(r.ended_at).getTime()
+                return [
                   <tr key={r.id} className="hover:bg-slate-900">
                     <td className="px-3 py-3">
                       <div className="font-semibold text-slate-200">{r.name}</div>
@@ -108,13 +113,98 @@ export default function TestRuns() {
                     <td className="px-3 py-3">
                       <MetadataBadges meta={r.metadata} />
                     </td>
-                  </tr>
-                )
+                    <td className="px-3 py-3 text-right">
+                      <button
+                        onClick={() => setOpen(open === r.id ? null : r.id)}
+                        className="text-xs px-2.5 py-1 rounded ring-1 ring-slate-700 text-slate-300 hover:text-slate-100"
+                      >{open === r.id ? 'Hide' : 'Compare'}</button>
+                    </td>
+                  </tr>,
+                  open === r.id && (
+                    <tr key={`${r.id}-compare`}>
+                      <td colSpan={6} className="px-3 pb-4 bg-slate-950/40">
+                        <Comparison id={r.id} />
+                      </td>
+                    </tr>
+                  ),
+                ]
               })}
             </tbody>
           </table>
         </div>
       )}
+    </div>
+  )
+}
+
+// Comparison shows how production traffic behaved before, during and after
+// a run, and how quickly latency recovered.
+function Comparison({ id }) {
+  const { get } = useAPI()
+  const [cmp, setCmp] = useState(null)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    let alive = true
+    get(`/test-runs/${encodeURIComponent(id)}/compare`)
+      .then(async (res) => {
+        if (!alive) return
+        if (res.ok) setCmp(await res.json())
+        else setError((await res.json()).error || `HTTP ${res.status}`)
+      })
+      .catch((e) => alive && setError(e.message))
+    return () => { alive = false }
+  }, [get, id])
+
+  if (error) return <p className="text-red-400 text-xs pt-3">{error}</p>
+  if (!cmp) return <p className="text-slate-500 text-xs pt-3">Loading comparison…</p>
+
+  const windows = [['Before', cmp.before], ['During', cmp.during], ['After', cmp.after]]
+  const rows = [
+    ['Requests', (w) => w.requests.toLocaleString()],
+    ['Requests / s', (w) => w.rps.toFixed(2)],
+    ['5xx rate', (w) => `${w.error_rate.toFixed(2)}%`],
+    ['p50', (w) => fmtDuration(w.p50_ms)],
+    ['p95', (w) => fmtDuration(w.p95_ms)],
+    ['p99', (w) => fmtDuration(w.p99_ms)],
+  ]
+
+  let verdict
+  if (cmp.before.requests === 0) verdict = 'No traffic before the run, so there is no baseline to compare with.'
+  else if (!cmp.degraded) verdict = 'p95 stayed within 10% of the baseline during the run.'
+  else if (cmp.recovery_seconds != null) {
+    // Resolution is one minute, so anything under 60s means "the first minute".
+    const when = cmp.recovery_seconds < 60
+      ? 'within a minute of the run ending'
+      : `${fmtDuration(cmp.recovery_seconds * 1000)} after the run ended`
+    verdict = `p95 went from ${fmtDuration(cmp.before.p95_ms)} to ${fmtDuration(cmp.during.p95_ms)}, then recovered ${when}.`
+  } else if (isZeroTime(cmp.run.ended_at)) verdict = 'The run is still in flight.'
+  else verdict = `p95 went from ${fmtDuration(cmp.before.p95_ms)} to ${fmtDuration(cmp.during.p95_ms)} and has not recovered yet.`
+
+  return (
+    <div className="pt-3">
+      <p className="text-sm text-slate-200 mb-2">{verdict}</p>
+      <table className="text-xs">
+        <thead>
+          <tr className="text-slate-500">
+            <th className="pr-6 py-1 text-left font-medium" />
+            {windows.map(([label]) => <th key={label} className="pr-6 py-1 text-right font-medium">{label}</th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(([label, value]) => (
+            <tr key={label}>
+              <td className="pr-6 py-0.5 text-slate-400">{label}</td>
+              {windows.map(([w, data]) => (
+                <td key={w} className="pr-6 py-0.5 text-right font-mono text-slate-200">{value(data)}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="text-[11px] text-slate-600 mt-2">
+        Counts every request (not just sampled ones) at one-minute resolution; percentiles are within ~6%.
+      </p>
     </div>
   )
 }

@@ -2,7 +2,9 @@ package pulse
 
 import (
 	"context"
+	"fmt"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -85,10 +87,10 @@ func TestBudgetConsumed(t *testing.T) {
 
 // --- End-to-end evaluator behaviour ---
 
-// TestSLOEvaluator_ComputesCompliance feeds the storage a known mix of good
-// and bad requests, runs evaluate(), and checks the resulting snapshot.
+// TestSLOEvaluator_ComputesCompliance feeds a known mix of good and bad
+// requests, runs evaluate(), and checks the resulting snapshot.
 func TestSLOEvaluator_ComputesCompliance(t *testing.T) {
-	p := newTestPulse(t)
+	p, clock := newClockedPulse(t)
 
 	slo := SLO{
 		Name:      "API availability",
@@ -99,21 +101,13 @@ func TestSLOEvaluator_ComputesCompliance(t *testing.T) {
 		// threshold below 5 so the firing branch exercises.
 		BurnRateAlerts: []BurnRateAlert{{Name: "fast-burn", Window: 5 * time.Minute, BurnRateMultiple: 2.0, Severity: "critical"}},
 	}
+	ev := newSLOEvaluator(p, []SLO{slo})
 
 	// 95 good + 5 bad over the last minute → compliance 0.95 < target 0.99
-	now := time.Now()
-	for i := 0; i < 95; i++ {
-		_ = p.storage.StoreRequest(RequestMetric{
-			Path: "/api/users", StatusCode: 200, Timestamp: now.Add(-30 * time.Second),
-		})
-	}
-	for i := 0; i < 5; i++ {
-		_ = p.storage.StoreRequest(RequestMetric{
-			Path: "/api/users", StatusCode: 500, Timestamp: now.Add(-30 * time.Second),
-		})
-	}
+	observeN(p, 95, "/api/users", 200, clock.Add(-30*time.Second))
+	observeN(p, 5, "/api/users", 500, clock.Add(-30*time.Second))
+	observeN(p, 50, "/healthz", 500, clock.Add(-30*time.Second)) // out of scope
 
-	ev := newSLOEvaluator(p, []SLO{slo})
 	ev.evaluate()
 
 	snaps := ev.Snapshot()
@@ -140,10 +134,10 @@ func TestSLOEvaluator_ComputesCompliance(t *testing.T) {
 	}
 }
 
-// TestSLOEvaluator_FiresAndResolves walks the firing → resolved transition
-// and confirms both alerts land in storage.
+// TestSLOEvaluator_FiresAndResolves walks the firing → resolved transition:
+// one alert record, fired and then resolved in place.
 func TestSLOEvaluator_FiresAndResolves(t *testing.T) {
-	p := newTestPulse(t)
+	p, clock := newClockedPulse(t)
 	slo := SLO{
 		Name:      "Test SLO",
 		Target:    0.99,
@@ -153,27 +147,14 @@ func TestSLOEvaluator_FiresAndResolves(t *testing.T) {
 			{Name: "fast-burn", Window: 5 * time.Minute, BurnRateMultiple: 2.0, Severity: "critical"},
 		},
 	}
-
-	now := time.Now()
-	// Bad slice: 70 good / 30 bad → 30% error rate, target budget 1% → 30× burn
-	for i := 0; i < 70; i++ {
-		_ = p.storage.StoreRequest(RequestMetric{
-			Path: "/api/x", StatusCode: 200, Timestamp: now.Add(-30 * time.Second),
-		})
-	}
-	for i := 0; i < 30; i++ {
-		_ = p.storage.StoreRequest(RequestMetric{
-			Path: "/api/x", StatusCode: 500, Timestamp: now.Add(-30 * time.Second),
-		})
-	}
-
 	ev := newSLOEvaluator(p, []SLO{slo})
+
+	// Bad slice: 70 good / 30 bad → 30% error rate, target budget 1% → 30× burn
+	observeN(p, 70, "/api/x", 200, clock.Add(-30*time.Second))
+	observeN(p, 30, "/api/x", 500, clock.Add(-30*time.Second))
 	ev.evaluate()
 
-	firing, _ := p.storage.GetAlerts(AlertFilter{
-		TimeRange: TimeRange{Start: now.Add(-time.Minute), End: now.Add(time.Minute)},
-		State:     AlertStateFiring,
-	})
+	firing, _ := p.storage.GetAlerts(AlertFilter{State: AlertStateFiring})
 	if len(firing) != 1 {
 		t.Fatalf("expected one firing burn-rate alert, got %d", len(firing))
 	}
@@ -181,21 +162,173 @@ func TestSLOEvaluator_FiresAndResolves(t *testing.T) {
 		t.Fatalf("rule name = %q, want slo:Test SLO:* prefix", firing[0].RuleName)
 	}
 
-	// Now reset and feed an all-good window so the burn-rate falls below threshold.
-	_ = p.storage.Reset()
-	for i := 0; i < 100; i++ {
-		_ = p.storage.StoreRequest(RequestMetric{
-			Path: "/api/x", StatusCode: 200, Timestamp: now.Add(-15 * time.Second),
-		})
-	}
+	// Ten minutes on, the bad slice has left the 5m window and traffic is
+	// healthy, so the burn rate falls below threshold.
+	*clock = clock.Add(10 * time.Minute)
+	observeN(p, 100, "/api/x", 200, clock.Add(-15*time.Second))
 	ev.evaluate()
 
-	resolved, _ := p.storage.GetAlerts(AlertFilter{
-		TimeRange: TimeRange{Start: now.Add(-time.Minute), End: now.Add(time.Minute)},
-		State:     AlertStateResolved,
+	all, _ := p.storage.GetAlerts(AlertFilter{})
+	if len(all) != 1 || all[0].State != AlertStateResolved || all[0].ID != firing[0].ID {
+		t.Fatalf("want the firing record resolved in place, got %+v", all)
+	}
+}
+
+// A few requests right after a deploy or restart must not page, however bad
+// their ratio: the burn window needs MinEvents first.
+func TestSLOEvaluator_MinEventsPreventsMisfire(t *testing.T) {
+	p, clock := newClockedPulse(t)
+	burn := BurnRateAlert{Name: "fast-burn", Window: 5 * time.Minute, BurnRateMultiple: 2, Severity: "critical"}
+	anyTraffic := burn
+	anyTraffic.MinEvents = 1
+	ev := newSLOEvaluator(p, []SLO{
+		{Name: "default-min", Target: 0.99, Window: time.Hour, Indicator: SLIErrorRate{}, BurnRateAlerts: []BurnRateAlert{burn}},
+		{Name: "min-one", Target: 0.99, Window: time.Hour, Indicator: SLIErrorRate{}, BurnRateAlerts: []BurnRateAlert{anyTraffic}},
 	})
-	if len(resolved) != 1 {
-		t.Fatalf("expected one resolved alert, got %d", len(resolved))
+
+	// 1 bad in 3 → 33% errors, a 33× burn — but only 3 events.
+	observeN(p, 2, "/x", 200, clock.Add(-10*time.Second))
+	observeN(p, 1, "/x", 500, clock.Add(-10*time.Second))
+	ev.evaluate()
+
+	snaps := ev.Snapshot()
+	if w := snaps[0].BurnWindows[0]; w.Firing || w.Events != 3 || w.MinEvents != defaultBurnRateMinEvents {
+		t.Errorf("default MinEvents: window = %+v, want not firing with 3 of %d events", w, defaultBurnRateMinEvents)
+	}
+	if w := snaps[1].BurnWindows[0]; !w.Firing {
+		t.Errorf("MinEvents=1: window = %+v, want firing", w)
+	}
+}
+
+// Multiwindow alerting: a burst that has passed keeps the long window hot,
+// but the short window has recovered, so the alert must not fire.
+func TestSLOEvaluator_ShortWindowResolvesAfterRecovery(t *testing.T) {
+	p, clock := newClockedPulse(t)
+	ev := newSLOEvaluator(p, []SLO{{
+		Name: "availability", Target: 0.99, Window: time.Hour, Indicator: SLIErrorRate{},
+		// nil → defaults: fast-burn 1h confirmed over 5m at 14.4×.
+	}})
+
+	observeN(p, 200, "/x", 500, clock.Add(-50*time.Minute)) // burst, long ago
+	observeN(p, 400, "/x", 200, clock.Add(-2*time.Minute))  // healthy since
+	ev.evaluate()
+
+	fast := ev.Snapshot()[0].BurnWindows[0]
+	if fast.BurnRate <= 14.4 || fast.ShortBurnRate != 0 || fast.Firing {
+		t.Fatalf("fast-burn = %+v, want long burn > 14.4, short burn 0, not firing", fast)
+	}
+
+	// The same burst inside the short window does fire.
+	observeN(p, 200, "/x", 500, clock.Add(-time.Minute))
+	ev.evaluate()
+	if fast := ev.Snapshot()[0].BurnWindows[0]; !fast.Firing {
+		t.Fatalf("fast-burn = %+v, want firing once the short window burns too", fast)
+	}
+}
+
+// Compliance counts every request, not the sampled ones in storage. With
+// 10% sampling, stored requests over-represent errors (always kept) about
+// tenfold; the SLO must still see exactly 1% errors.
+func TestSLOEvaluator_SamplingDoesNotSkewCompliance(t *testing.T) {
+	router := gin.New()
+	p := Mount(context.Background(), router, nil,
+		WithDevMode(),
+		WithSampleRate(0.1),
+		WithSLO(SLO{Name: "availability", Target: 0.99, Window: time.Hour,
+			Indicator: SLIErrorRate{}, BurnRateAlerts: []BurnRateAlert{}}),
+	)
+	t.Cleanup(func() { _ = p.Shutdown() })
+	router.GET("/work/:n", func(c *gin.Context) {
+		if c.Param("n") == "0" {
+			c.Status(500)
+			return
+		}
+		c.Status(200)
+	})
+
+	for i := 0; i < 2000; i++ {
+		router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", fmt.Sprintf("/work/%d", i%100), nil))
+	}
+
+	stored, _ := p.storage.GetRequests(RequestFilter{TimeRange: Last1h()})
+	if len(stored) > 1500 {
+		t.Fatalf("stored %d of 2000 requests; sampling at 0.1 should keep far fewer", len(stored))
+	}
+
+	p.sloEvaluator.evaluate()
+	s := p.sloEvaluator.Snapshot()[0]
+	if s.TotalEvents != 2000 || s.GoodEvents != 1980 {
+		t.Fatalf("events = (good=%d, total=%d), want (1980, 2000)", s.GoodEvents, s.TotalEvents)
+	}
+}
+
+// After a restart (SQLite), a still-burning SLO must not page again, and
+// once it recovers the original alert resolves.
+func TestSLOEvaluator_RestoresFiringAfterRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "slo.db")
+	slo := SLO{Name: "restart", Target: 0.99, Window: time.Hour, Indicator: SLIErrorRate{},
+		BurnRateAlerts: []BurnRateAlert{{Name: "fast-burn", Window: 10 * time.Minute, BurnRateMultiple: 2, Severity: "critical"}}}
+	clock := sloTestTime
+
+	open := func() (*Pulse, *sloEvaluator) {
+		p := newPulse(context.Background(), applyDefaults(Config{DevMode: true, SLOs: []SLO{slo}}))
+		p.now = func() time.Time { return clock }
+		p.rollups = newRollups(24*time.Hour, []SLO{slo}, clock)
+		s, err := NewSQLiteStorage(path, "test")
+		if err != nil {
+			t.Fatalf("open storage: %v", err)
+		}
+		p.storage = s
+		restoreRollups(p)
+		return p, newSLOEvaluator(p, []SLO{slo})
+	}
+
+	// First run: the SLO burns and pages; rollups are saved on shutdown.
+	p1, ev1 := open()
+	observeN(p1, 50, "/x", 500, clock.Add(-30*time.Second))
+	ev1.evaluate()
+	flushRollups(p1)
+	_ = p1.Shutdown()
+
+	// Restarted a minute later, still burning.
+	clock = clock.Add(time.Minute)
+	p2, ev2 := open()
+	t.Cleanup(func() { _ = p2.Shutdown() })
+	ev2.evaluate()
+	all, _ := p2.storage.GetAlerts(AlertFilter{})
+	if len(all) != 1 || all[0].State != AlertStateFiring {
+		t.Fatalf("after restart: %+v, want the one original firing alert (no second page)", all)
+	}
+	firedID := all[0].ID
+
+	// The burst leaves the window: the original alert resolves in place.
+	clock = clock.Add(time.Hour)
+	ev2.evaluate()
+	all, _ = p2.storage.GetAlerts(AlertFilter{})
+	if len(all) != 1 || all[0].ID != firedID || all[0].State != AlertStateResolved {
+		t.Fatalf("after recovery: %+v, want alert %s resolved in place", all, firedID)
+	}
+}
+
+// sloTestTime is a fixed "now", 45s into a minute, so events a few seconds
+// earlier land in the same rollup minute.
+var sloTestTime = time.Date(2026, 1, 15, 12, 30, 45, 0, time.UTC)
+
+// newClockedPulse returns a Pulse whose clock reads *clock (initially
+// sloTestTime) and whose rollups already cover the past week.
+func newClockedPulse(t *testing.T) (*Pulse, *time.Time) {
+	t.Helper()
+	p := newTestPulse(t)
+	clock := sloTestTime
+	p.now = func() time.Time { return clock }
+	p.rollups = newRollups(24*time.Hour, nil, sloTestTime.Add(-7*24*time.Hour))
+	return p, &clock
+}
+
+// observeN records n requests to path with the given status at time at.
+func observeN(p *Pulse, n int, path string, status int, at time.Time) {
+	for i := 0; i < n; i++ {
+		p.rollups.observe("GET", path, path, status, time.Millisecond, at)
 	}
 }
 

@@ -3,13 +3,15 @@ package pulse
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"time"
 )
 
 // Version is the current Pulse SDK version, bumped on each release.
-const Version = "1.0.1"
+const Version = "1.1.0"
 
 // DefaultUsername is the placeholder dashboard username shipped in defaults.
 // In production (DevMode=false) Pulse refuses to start while this value is in
@@ -86,6 +88,12 @@ type Config struct {
 
 	// DevMode enables verbose logging and more frequent aggregation.
 	DevMode bool
+
+	// InstanceID identifies this process in lifecycle (start/stop) events.
+	// Default: the hostname, which stays the same across restarts, so an
+	// unclean shutdown can be detected at the next start. Set it explicitly
+	// when several processes on one host share a storage file.
+	InstanceID string
 }
 
 // ProfilingConfig gates the on-demand CPU profile + flame graph endpoint.
@@ -161,6 +169,21 @@ type StorageConfig struct {
 	// A background sweeper drops records older than this from both
 	// backends.
 	RetentionHours int
+	// MemoryCapacity sizes the Memory backend's ring buffers.
+	MemoryCapacity MemoryCapacity
+}
+
+// MemoryCapacity sizes the Memory backend's ring buffers. Each buffer keeps
+// this many of the most recent records; zero keeps the default. Under
+// sustained traffic, buffer size rather than RetentionHours limits how much
+// history is kept — the built-in storage_retention_limited alert says when.
+type MemoryCapacity struct {
+	Requests     int // default 100,000
+	Queries      int // default 50,000
+	Dependencies int // default 50,000
+	// Runtime defaults to enough samples to cover RetentionHours at
+	// Runtime.SampleInterval (at least 10,000).
+	Runtime int
 }
 
 // TracingConfig configures request tracing.
@@ -211,6 +234,38 @@ type ErrorConfig struct {
 	CaptureRequestBody *bool
 	// MaxBodySize limits captured request body size in bytes (default: 4096).
 	MaxBodySize int
+	// Redaction extends (or replaces) the built-in rules for stripping
+	// secrets from captured request context and error messages.
+	Redaction RedactionConfig
+}
+
+// RedactionConfig controls how secrets are stripped from what Pulse stores
+// about failed requests: headers, query string, body, path, and the error
+// message. The built-in rules cover common credential, token and payment
+// field names in any naming style (password, newPassword, card_number,
+// api_key, …) and detect card numbers, JWTs, bearer tokens, AWS access keys
+// and private keys inside free text. Fields here add to them.
+type RedactionConfig struct {
+	// Fields are extra field names whose values are always redacted, in JSON
+	// bodies, form bodies and query strings. Matching ignores case and '_',
+	// '-' and '.', so "date_of_birth" also matches "dateOfBirth".
+	Fields []string
+	// FieldContains are extra substrings: any field whose normalized name
+	// contains one is redacted ("medical" catches "medicalRecordNo").
+	FieldContains []string
+	// Headers are extra header names whose values are redacted.
+	Headers []string
+	// ValuePatterns are extra patterns searched for in every captured string
+	// value and in error messages; matches are replaced with "[REDACTED]".
+	// For example, US social security numbers:
+	// regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`).
+	ValuePatterns []*regexp.Regexp `json:"-"`
+	// DisableDefaults turns off every built-in rule, leaving only the ones
+	// above. Not recommended.
+	DisableDefaults bool
+	// Hook, if set, runs last on every captured request context and may
+	// modify it. If it panics, the context is reduced to method and path.
+	Hook func(*RequestContext) `json:"-"`
 }
 
 // HealthConfig configures the health check system.
@@ -385,6 +440,9 @@ func applyDefaults(cfg Config) Config {
 	if cfg.AppName == "" {
 		cfg.AppName = defaults.AppName
 	}
+	if cfg.InstanceID == "" {
+		cfg.InstanceID = defaultInstanceID()
+	}
 
 	// Dashboard
 	if cfg.Dashboard.Username == "" {
@@ -506,6 +564,14 @@ func applyDefaults(cfg Config) Config {
 	return cfg
 }
 
+// defaultInstanceID is the hostname, or "pulse" when it can't be read.
+func defaultInstanceID() string {
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return h
+	}
+	return "pulse"
+}
+
 func boolPtr(b bool) *bool {
 	return &b
 }
@@ -566,18 +632,90 @@ func resolveSecretKey(cfg DashboardConfig) (key string, ephemeral bool, err erro
 			return "", false, readErr
 		}
 
-		// File missing (or empty) — create it.
-		k := generateSecretKey()
 		if mkErr := os.MkdirAll(filepath.Dir(path), 0o700); mkErr != nil && !os.IsExist(mkErr) {
 			return "", false, mkErr
 		}
-		if writeErr := os.WriteFile(path, []byte(k), 0o600); writeErr != nil {
-			return "", false, writeErr
+		if readErr == nil {
+			// The file exists but is empty (pre-created by hand): fill it.
+			k := generateSecretKey()
+			if writeErr := os.WriteFile(path, []byte(k), 0o600); writeErr != nil {
+				return "", false, writeErr
+			}
+			return k, false, nil
+		}
+		k, err := createSecretKeyFile(path)
+		if err != nil {
+			return "", false, err
 		}
 		return k, false, nil
 	}
 
 	return generateSecretKey(), true, nil
+}
+
+// createSecretKeyFile creates path holding a fresh key. Replicas starting at
+// once against a shared key file must all end up with the same key, so the
+// key is written to a temporary file and hard-linked into place: exactly one
+// link succeeds, and every other process reads the winner's key.
+func createSecretKeyFile(path string) (string, error) {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".pulse-secret-*")
+	if err != nil {
+		return "", err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+
+	k := generateSecretKey()
+	_, writeErr := tmp.WriteString(k)
+	closeErr := tmp.Close()
+	if writeErr != nil {
+		return "", writeErr
+	}
+	if closeErr != nil {
+		return "", closeErr
+	}
+	_ = os.Chmod(tmpName, 0o600)
+
+	linkErr := os.Link(tmpName, path)
+	switch {
+	case linkErr == nil:
+		return k, nil
+	case os.IsExist(linkErr):
+		return readSecretKeyFile(path)
+	}
+
+	// No hard links on this filesystem: fall back to an exclusive create.
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if os.IsExist(err) {
+		return readSecretKeyFile(path)
+	}
+	if err != nil {
+		return "", err
+	}
+	_, writeErr = f.WriteString(k)
+	closeErr = f.Close()
+	if writeErr != nil {
+		return "", writeErr
+	}
+	return k, closeErr
+}
+
+// readSecretKeyFile reads a key another process just created, retrying
+// briefly in case that process is still writing it.
+func readSecretKeyFile(path string) (string, error) {
+	for attempt := 0; ; attempt++ {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", err
+		}
+		if k := trimTrailingWhitespace(string(data)); k != "" {
+			return k, nil
+		}
+		if attempt == 50 {
+			return "", fmt.Errorf("secret key file %s stayed empty", path)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func trimTrailingWhitespace(s string) string {

@@ -53,7 +53,8 @@ func TestAlertEngine_DefaultRules(t *testing.T) {
 		}
 	}
 
-	expectedRules := []string{"high_latency", "high_error_rate", "high_memory", "goroutine_leak", "health_check_failure"}
+	expectedRules := []string{"high_latency", "high_error_rate", "high_memory", "goroutine_leak", "health_check_failure",
+		"storage_retention_limited", "storage_writes_dropped"}
 	for _, name := range expectedRules {
 		if _, ok := ae.ruleStates[name]; !ok {
 			t.Errorf("expected default rule %q to exist", name)
@@ -393,6 +394,29 @@ func TestAlertEngine_CooldownSuppressedFiringIsNotResolved(t *testing.T) {
 	alerts, _ := p.storage.GetAlerts(AlertFilter{})
 	if len(alerts) != 1 || alerts[0].Value != 10 || alerts[0].State != AlertStateResolved {
 		t.Fatalf("want only the first, resolved incident; got %+v", alerts)
+	}
+}
+
+// TestAlertEngine_RestoresFiringAfterRestart: a rule left firing by a
+// previous run is picked up as firing, so it neither pages again nor strands
+// the old record — recovery resolves the original alert.
+func TestAlertEngine_RestoresFiringAfterRestart(t *testing.T) {
+	p := setupAlertPulse(t)
+	_ = p.storage.StoreAlert(AlertRecord{
+		ID: "open-1", RuleName: "high_error_rate", Metric: "error_rate", Value: 42,
+		Severity: "critical", State: AlertStateFiring, FiredAt: time.Now().Add(-time.Hour),
+	})
+
+	ae := newAlertEngine(p)
+	rs := ae.ruleStates["high_error_rate"]
+	if rs.state != AlertStateFiring || rs.alertID != "open-1" || rs.firedValue != 42 {
+		t.Fatalf("rule state = %+v, want firing with the stored alert", rs)
+	}
+
+	ae.resolveAlert(rs)
+	alerts, _ := p.storage.GetAlerts(AlertFilter{})
+	if len(alerts) != 1 || alerts[0].ID != "open-1" || alerts[0].State != AlertStateResolved {
+		t.Fatalf("want open-1 resolved in place, got %+v", alerts)
 	}
 }
 

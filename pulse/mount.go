@@ -70,6 +70,11 @@ func Mount(ctx context.Context, router *gin.Engine, db *gorm.DB, opts ...Option)
 			"Set Dashboard.SecretKeyFile to persist the key.")
 	}
 
+	if cfg.Storage.Driver == Memory && !cfg.DevMode {
+		log.Printf("[pulse] note: in-memory storage keeps no history across restarts, so the " +
+			"dashboard starts empty after every deploy or crash. Use pulse.WithSQLite(path) to keep it.")
+	}
+
 	// Create the Pulse engine — its background goroutines inherit ctx, so
 	// they exit when the caller cancels (or when Pulse.Shutdown is called).
 	p := newPulse(ctx, cfg)
@@ -83,8 +88,16 @@ func Mount(ctx context.Context, router *gin.Engine, db *gorm.DB, opts ...Option)
 		}
 		p.storage = store
 	default:
-		p.storage = NewMemoryStorage(cfg.AppName)
+		p.storage = newMemoryStorage(cfg.AppName, memoryCapacityFor(cfg))
 	}
+
+	// Clean error records stored unredacted by earlier versions (once).
+	scrubStoredErrors(p)
+
+	// Mark this process's start (flagging an unclean previous shutdown) and
+	// record its stop when the context ends.
+	recordStart(p)
+	startLifecycleWatcher(p)
 
 	// Start the WebSocket hub before any subsystem that broadcasts (runtime
 	// sampler, aggregator, health runner, alerts): their goroutines read
@@ -93,6 +106,11 @@ func Mount(ctx context.Context, router *gin.Engine, db *gorm.DB, opts ...Option)
 	p.startBackground("websocket-hub", func(ctx context.Context) {
 		p.wsHub.run()
 	})
+
+	// Restore persisted request rollups (SQLite) before any request is
+	// counted, then keep them saved and pruned.
+	restoreRollups(p)
+	startRollupFlusher(p)
 
 	// Start retention sweeper (drops error/alert/N+1 records older than
 	// Storage.RetentionHours). Ring buffers self-trim, so this is only
@@ -124,6 +142,11 @@ func Mount(ctx context.Context, router *gin.Engine, db *gorm.DB, opts ...Option)
 		p.AddHealthCheck(DatabaseHealthCheck(db))
 	}
 
+	// Surface trouble with Pulse's own SQLite storage (Memory can't fail).
+	if cfg.Storage.Driver == SQLite && boolValue(cfg.Health.Enabled) {
+		p.AddHealthCheck(storageHealthCheck(p))
+	}
+
 	// Start health check runner
 	if boolValue(cfg.Health.Enabled) {
 		p.healthRunner = newHealthRunner(p)
@@ -138,6 +161,7 @@ func Mount(ctx context.Context, router *gin.Engine, db *gorm.DB, opts ...Option)
 	// reuse the notification channels.
 	if len(cfg.SLOs) > 0 {
 		p.sloEvaluator = newSLOEvaluator(p, cfg.SLOs)
+		p.sloEvaluator.start()
 	}
 
 	// Start USE-method host-resource sampler.
@@ -217,9 +241,7 @@ func startRetentionSweeper(p *Pulse) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if err := p.storage.Cleanup(retention); err != nil && p.config.DevMode {
-					p.logger.Printf("[pulse] retention sweep error: %v", err)
-				}
+				p.internalError("storage: retention sweep", p.storage.Cleanup(retention))
 			}
 		}
 	})

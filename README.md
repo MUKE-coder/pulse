@@ -47,13 +47,17 @@ Pulse gives you full visibility into your application's HTTP requests, database 
 - **Error Tracking** — Panic recovery, stack traces, request body capture, error fingerprinting for deduplication, and automatic classification (validation, database, timeout, auth, etc.).
 - **Health Checks** — Pluggable health check system with Kubernetes-compatible endpoints (`/live`, `/ready`), composite status, and flapping detection.
 - **Alerting Engine** — Threshold-based rules with two-phase firing (prevents false alerts), cooldown periods, and multi-channel notifications (Slack, Discord, Email, Webhooks with HMAC signatures).
+- **SLOs with burn-rate alerts** — Multiwindow burn-rate alerting (Google SRE workbook), computed from exact per-minute counts of every request, so sampling never skews compliance. Survives restarts with the SQLite backend.
+- **Secret redaction** — Passwords, tokens, card numbers, JWTs and keys are stripped from captured request context, error messages and outbound URLs before anything is stored, whatever the field name or naming style. Configurable.
+- **Load-test overlay** — k6 (or any harness) runs appear as bands on the dashboard timelines, with a before/during/after comparison and time to recovery.
+- **Knows its own limits** — Alerts when buffer capacity rather than your retention setting limits history, when writes are dropped, and after an unclean restart. Pulse's own failures are counted and exported.
 - **Dependency Monitoring** — Wrap any `http.Client` to track external API latency, error rates, and availability.
 - **WebSocket Live Updates** — Real-time streaming of requests, errors, health checks, alerts, and runtime metrics to connected clients with per-client channel subscriptions.
 - **Prometheus Export** — Standard exposition format endpoint for Grafana/Prometheus integration.
 - **Data Export** — Export requests, queries, errors, runtime metrics, and alerts as JSON or CSV.
 - **JWT Authentication** — Dashboard API protected with HS256 JWT tokens (no external auth library).
-- **Embedded React Dashboard** — Full-featured UI with 8 pages (Overview, Routes, Database, Errors, Runtime, Health, Alerts, Settings) embedded into the Go binary via `//go:embed`. No separate frontend deployment needed.
-- **Zero External Dependencies** — No Redis, no Kafka, no external collectors. Everything runs in-process with ring buffer storage.
+- **Embedded React Dashboard** — Full-featured UI with 12 pages (Overview, Routes, Database, Errors, Runtime, Health, Alerts, SLOs, USE, Test Runs, Flame Graph, Settings) embedded into the Go binary via `//go:embed`. No separate frontend deployment needed.
+- **Zero External Dependencies** — No Redis, no Kafka, no external collectors. Everything runs in-process, in memory or in a local SQLite file.
 
 ---
 
@@ -67,14 +71,18 @@ Pulse ships with a full React dashboard embedded directly into the Go binary usi
 
 | Page | Description |
 |------|-------------|
-| **Overview** | KPI cards (requests, error rate, latency, goroutines), throughput and error charts, top routes, recent errors |
+| **Overview** | KPI cards (requests, error rate, latency, goroutines), throughput and error charts with load-test runs as bands and restarts as markers, top routes, recent errors, and a banner when data is missing after a restart |
 | **Routes** | Searchable route table with method badges, latency percentiles (P50/P95/P99), RPM, trend indicators; click for detail modal with latency distribution chart |
 | **Database** | Slow queries, query patterns, N+1 detection with tabs; connection pool stats (open, in-use, idle) |
 | **Errors** | Filterable error list (by type, muted, resolved); detail modal with full stack trace, mute/resolve/delete actions |
 | **Runtime** | Memory and goroutine line charts over time, system info (Go version, CPUs, PID); real-time updates via WebSocket |
 | **Health** | Health check cards with status badges and latency; run checks on-demand; per-check history table |
 | **Alerts** | Firing/critical/resolved summary; filterable alert table with rule, metric, value, threshold, and timestamps |
-| **Settings** | Data export (JSON/CSV), current configuration display, danger zone data reset |
+| **SLOs** | Compliance, error budget, and long- and short-window burn rates per SLO, with data coverage |
+| **USE** | Utilization / Saturation / Errors grid per host resource |
+| **Test Runs** | Load-test runs with a before/during/after comparison and time to recovery |
+| **Flame Graph** | On-demand sampled flame graph (double-gated) |
+| **Settings** | Data export (JSON/CSV), storage capacity, current configuration display, danger zone data reset |
 
 **Tech Stack:** React 19, React Router 7, Vite 6, Tailwind CSS 4, Recharts 2
 
@@ -92,7 +100,7 @@ The `ui/dist/` directory is committed to the repo so consumers don't need Node.j
 
 ## Requirements
 
-- **Go** 1.22 or later
+- **Go** 1.24 or later
 - **Gin** v1.9+
 - **GORM** v1.25+ (optional — pass `nil` if not using a database)
 
@@ -258,9 +266,26 @@ Storage: pulse.StorageConfig{
 
 **Memory backend** — fixed-capacity ring buffers (100K requests, 50K queries). Fast and bounded, but data is lost on restart. Under sustained traffic the buffer, not `RetentionHours`, limits how much history you have: 100K requests is about 17 minutes at 100 req/s.
 
-**SQLite backend** — pure Go (no CGo), WAL journal mode, `busy_timeout=5000ms`. The schema is created automatically on first open. Writes are synchronous in v1.0.0 — high-throughput workloads should stay on Memory until batched writes ship in v1.1. Comes from `github.com/glebarez/go-sqlite`, already a transitive dependency, so no new module is pulled in for Memory-only consumers.
+**SQLite backend** — pure Go (no CGo), WAL journal mode, `busy_timeout=5000ms`. The schema is created automatically on first open. Metric writes are queued and committed in batches by a single writer (up to 500 rows, or every 250 ms), so storing never blocks a request. If the queue fills, records are dropped and counted rather than slowing your app. Reads always see earlier writes, and a crash loses at most the last quarter-second. Comes from `github.com/glebarez/go-sqlite`, already a transitive dependency, so no new module is pulled in for Memory-only consumers.
 
 A background **retention sweeper** runs every minute (every 10 s in `DevMode`) against both backends, dropping records older than `RetentionHours`. Ring buffers also self-trim by overwriting their oldest entries.
+
+**Exact counts, whatever the sample rate.** Alongside the stored records, Pulse keeps per-minute tallies of every request: counts, 4xx/5xx, a latency histogram, and SLO good/total events. Overview totals, error rates, SLOs and load-test comparisons come from these, so `Tracing.SampleRate` and ring-buffer size never skew them. With SQLite they are saved every 30 s and restored at startup.
+
+**Knowing when history is limited.** `GET /pulse/api/storage` (and the Settings page) shows each buffer's fill level and how far back it actually reaches. The built-in `storage_retention_limited` alert fires when a full buffer holds less than half of `RetentionHours`. Raise the buffer sizes with `pulse.WithMemoryCapacity(pulse.MemoryCapacity{Requests: 500_000})`, or switch to SQLite. `storage_writes_dropped` fires when the SQLite write queue overflows.
+
+**Restarts.** Pulse records a start and a stop event for each process. With SQLite, a start whose previous run never recorded a stop (crash, OOM kill, `kill -9`) is flagged, together with the time of the last data before it. The dashboard marks restarts on its charts and explains missing data, and `GET /pulse/api/lifecycle` returns the events. In production, Pulse logs a note at startup when it runs on in-memory storage.
+
+#### Running multiple replicas
+
+Each replica keeps its own data (in memory, or in its own SQLite file), so each replica's dashboard shows only that replica's traffic. For dashboard logins to work on every replica:
+
+- Give every replica the **same signing key**: `pulse.WithSecretKey(os.Getenv("PULSE_SECRET"))` (recommended), or a `SecretKeyFile` on a shared volume. Replicas that start at the same moment against one key file agree on a single key.
+- Pin each browser's dashboard traffic to one replica (sticky sessions), so it doesn't flip between replicas' data.
+- If several replicas share a host, give each its own `pulse.WithInstanceID(...)`. It defaults to the hostname and appears on the dashboard and in `pulse_build_info`.
+- The login rate limit and alert evaluation run per replica, so each replica sends its own notifications.
+
+[`examples/multi-instance`](examples/multi-instance) runs two replicas behind Caddy. A shared storage backend is planned for v1.2.
 
 ### Request Tracing
 
@@ -273,7 +298,7 @@ Tracing: pulse.TracingConfig{
 },
 ```
 
-Errors and slow requests are **always** captured regardless of sample rate. Every request gets a trace ID propagated via both the legacy `X-Pulse-Trace-ID` header and the W3C [`traceparent`](https://www.w3.org/TR/trace-context/) header.
+Errors and slow requests are **always** captured regardless of sample rate. Sampling only thins out the stored request records: request counts, error rates, SLO compliance and load-test comparisons still count every request. Every request gets a trace ID propagated via both the legacy `X-Pulse-Trace-ID` header and the W3C [`traceparent`](https://www.w3.org/TR/trace-context/) header.
 
 If an inbound request already carries a valid `traceparent`, Pulse adopts the upstream `trace-id` instead of generating a new one — so traces continue cleanly across service boundaries when upstream services are instrumented with OpenTelemetry. Outbound calls sent through `pulse.WrapHTTPClient` get a `traceparent` header injected automatically.
 
@@ -324,12 +349,24 @@ Pulse automatically:
 - Redacts secrets before anything is stored, broadcast, or exported:
   - **Headers:** `Authorization`, `Cookie`, `X-API-Key`, `X-CSRF-Token`, `X-Amz-Security-Token`, and similar
   - **JSON body fields, form keys, and query parameters** whose names look secret, at any nesting depth and in any naming style: `password`, `newPassword`, `card_number`, `cardNumber`, `api_key`, `client_secret`, `access_token`, `cvv`, `ssn`, `pin`, `otp`, …
+  - **Secrets inside any text** — card numbers (Luhn-checked), JWTs, `Bearer` tokens, AWS access keys and private keys — in body values, header values, the path, error messages, and outbound URLs and their errors
   - **Outbound URLs** recorded by `WrapHTTPClient`: userinfo passwords and sensitive query parameters
 - Fails closed: only JSON and form bodies are captured. Other content types (text, XML, multipart, binary) are stored as `[body omitted: N bytes of <type>]`, and a JSON body cut off at `MaxBodySize` is redacted up to the cut and flagged `body_truncated`
-
-If your payloads carry secrets under field names the redactor won't recognise, turn body capture off with `pulse.WithRequestBodyCaptureDisabled()`. Configurable field lists are planned for v1.1.
-- Fingerprints errors for deduplication (same error at same route = same group)
+- Fingerprints errors for deduplication (same error at same route = same group; values redacted from a message don't split the group)
 - Classifies errors: `panic`, `validation`, `database`, `timeout`, `auth`, `not_found`, `internal`
+
+**Adding your own redaction rules:**
+
+```go
+pulse.Mount(ctx, router, db,
+    pulse.WithRedactFields("date_of_birth", "medical_record_no"), // matched in any naming style
+    pulse.WithRedactHeaders("X-Tenant-Secret"),
+    pulse.WithRedactValuePatterns(regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)), // US SSNs
+    pulse.WithRedactor(func(rc *pulse.RequestContext) { delete(rc.Headers, "X-Internal-Trace") }),
+)
+```
+
+`Config.Errors.Redaction` also takes substring stems (`FieldContains`) and `DisableDefaults`. If a redaction hook panics, the captured context is cut down to method and path. Error records stored unredacted by v1.0.0 are re-redacted automatically, once, the first time v1.1 opens an SQLite database.
 
 ### Health Checks
 
@@ -344,7 +381,7 @@ Health: pulse.HealthConfig{
 Pulse automatically registers a database health check when a GORM `*gorm.DB` is provided. You can add custom checks:
 
 ```go
-p := pulse.Mount(router, db, cfg)
+p := pulse.Mount(ctx, router, db)
 
 p.AddHealthCheck(pulse.HealthCheck{
     Name:     "redis",
@@ -356,7 +393,13 @@ p.AddHealthCheck(pulse.HealthCheck{
 })
 ```
 
+Each check runs in its own goroutine on its own `Interval` (default: `CheckInterval`). Pulse enforces the `Timeout` even if a check ignores its context, so a hung dependency fails its own check without delaying the others, and isn't started again while it is stuck. A panicking check fails instead of crashing the process.
+
+With the SQLite backend, Pulse also registers a non-critical `pulse_storage` check. It fails when Pulse's own storage writes fail or are dropped, so Pulse's trouble makes the app read `degraded`, never `unhealthy`.
+
 **Public Health Endpoints (no auth required):**
+
+These answer from the latest results held in memory, so they keep working when Pulse's own storage is slow.
 
 | Endpoint | Description |
 |----------|-------------|
@@ -435,17 +478,21 @@ Alerts: pulse.AlertConfig{
 
 | Rule | Metric | Condition | Duration | Severity |
 |------|--------|-----------|----------|----------|
-| `high_latency` | P95 latency | > 2000ms | 5 min | critical |
+| `high_latency` | P95 latency | > 2000ms | 5 min | warning |
 | `high_error_rate` | Error rate | > 10% | 3 min | critical |
 | `high_memory` | Heap allocation | > 500MB | 5 min | warning |
 | `goroutine_leak` | Goroutine growth | > 100/hour | 10 min | warning |
 | `health_check_failure` | Health status | unhealthy | 2 min | critical |
+| `storage_retention_limited` | Retention coverage | < 50% | 15 min | warning |
+| `storage_writes_dropped` | Dropped writes | > 0 since the last check | immediate | warning |
 
 Custom rules with the same name as a default will **override** the default.
 
 **Alert Lifecycle:** `OK` -> `Pending` (condition met) -> `Firing` (duration exceeded) -> `Resolved` (condition cleared)
 
-The two-phase transition (OK -> Pending -> Firing) prevents false alerts from transient spikes.
+The two-phase transition (OK -> Pending -> Firing) prevents false alerts from transient spikes. Each incident is one alert record: resolving updates the firing record rather than adding a second. After a restart, alerts still open in storage are picked up again, so a rule that is still breaching doesn't page twice.
+
+Notifications go through a bounded queue, and every channel has a timeout (email included). Delivery failures are counted as Pulse internal errors and logged without the webhook URL, since chat webhook URLs are credentials.
 
 **Available Metrics for Rules:**
 - `p95_latency` — P95 request latency in milliseconds
@@ -453,6 +500,8 @@ The two-phase transition (OK -> Pending -> Firing) prevents false alerts from tr
 - `heap_alloc_mb` — Heap allocation in megabytes
 - `goroutine_growth` — Goroutine growth rate per hour
 - `health_status` — Composite health check status (1 = healthy, 0 = unhealthy)
+- `retention_coverage` — Fraction of `RetentionHours` held by the fullest storage buffer (0–1)
+- `storage_dropped_writes` — Storage writes dropped since the previous evaluation
 
 ### Flame graph (profiling)
 
@@ -491,7 +540,7 @@ Only one sample window is active at a time. Concurrent requests get `409 Conflic
 
 Pulse exposes a `POST /pulse/api/test-runs` endpoint that any load-test harness can call at run start and end (posting the same `id` twice updates the run). Runs are listed on the dashboard's **Test Runs** page with their duration and metadata, and `GET /pulse/api/test-runs?range=…` returns them for your own tooling.
 
-Drawing runs as bands on the latency / RPS / error charts, with a before/during/after comparison (*"p95 climbed from 80 ms → 1100 ms, then recovered within 90 s"*), is planned for v1.1.
+Runs appear as shaded, labelled bands on the Overview and Runtime charts. On the **Test Runs** page, **Compare** shows how production traffic behaved before, during and after a run: request rate, 5xx rate and p50/p95/p99, plus how long p95 took to recover (*"p95 went from 80ms to 1.1s, then recovered 2m after the run ended"*). The comparison counts every request at one-minute resolution. `GET /pulse/api/test-runs/:id/compare` returns it as JSON.
 
 For k6 specifically, drop the bundled bridge into your test directory:
 
@@ -582,12 +631,16 @@ pulse.Mount(ctx, router, db,
 
 **Burn-rate alerts** (Google SRE workbook recommendation, applied by default):
 
-| Name | Window | Burn rate | Severity |
-|------|--------|-----------|----------|
-| `fast-burn` | 1h | 14.4× | critical |
-| `slow-burn` | 6h | 6.0×  | warning  |
+| Name | Window | Confirmed over | Burn rate | Severity |
+|------|--------|----------------|-----------|----------|
+| `fast-burn` | 1h | 5m | 14.4× | critical |
+| `slow-burn` | 6h | 30m | 6.0× | warning |
 
 A burn rate of N× means the SLO is consuming its monthly error budget N× faster than allowed. Fast-burn fires when 2% of the monthly budget is spent in an hour; slow-burn fires when 5% is spent in 6 hours. Override per-SLO via `BurnRateAlerts: []pulse.BurnRateAlert{...}`.
+
+An alert fires only when both its window and its shorter confirmation window burn faster than the threshold, and the window holds at least `MinEvents` events (default 20). So an alert resolves soon after a burn stops, and a handful of requests after a deploy or restart can't page. Set `ShortWindow` and `MinEvents` per alert to change this.
+
+SLOs are computed from exact per-minute counts of every request, so sampling doesn't skew them. With the SQLite backend, those counts and any alerts still firing survive restarts. `data_coverage` in `/pulse/api/slos` (and a note on the SLOs page) says how much of the window Pulse actually has data for.
 
 **Why burn rate, not raw error rate?** A 0.5% error rate is catastrophic for a 99.99% SLO (50× burn) and unremarkable for a 90% SLO (0.05× burn). Same number, totally different meaning. Burn rate normalises against the SLO you actually care about.
 
@@ -621,6 +674,12 @@ Prometheus: pulse.PrometheusConfig{
 | `pulse_db_pool_in_use` | gauge | | In-use DB connections |
 | `pulse_db_pool_idle` | gauge | | Idle DB connections |
 | `pulse_uptime_seconds` | gauge | | Pulse uptime |
+| `pulse_storage_records` | gauge | kind | Records held per storage kind |
+| `pulse_storage_effective_retention_seconds` | gauge | kind | How far back a full storage kind reaches |
+| `pulse_storage_retention_coverage_ratio` | gauge | | Fraction of the configured retention the fullest kind holds |
+| `pulse_storage_dropped_writes_total` | counter | | Writes dropped because the write queue was full |
+| `pulse_internal_errors_total` | counter | component | Failures inside Pulse itself (storage, notifications, …) |
+| `pulse_build_info` | gauge | version, instance_id, storage | Always 1; identifies the Pulse instance |
 
 ---
 
@@ -629,7 +688,7 @@ Prometheus: pulse.PrometheusConfig{
 Track external HTTP API calls by wrapping your `http.Client`:
 
 ```go
-p := pulse.Mount(router, db, cfg)
+p := pulse.Mount(ctx, router, db)
 
 // Wrap any http.Client — returns a drop-in replacement
 stripeClient := pulse.WrapHTTPClient(p, &http.Client{
@@ -793,6 +852,14 @@ All endpoints under `/pulse/api/` require JWT authentication (except login).
 |--------|----------|-------------|
 | `GET` | `/pulse/api/test-runs?range=…` | List test runs whose window overlaps the range |
 | `POST` | `/pulse/api/test-runs` | Record a synthetic test run (k6 bridge POSTs here at run start + end) |
+| `GET` | `/pulse/api/test-runs/:id/compare` | Before / during / after comparison of production traffic, and time to recovery |
+
+### Storage and lifecycle
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/pulse/api/storage` | Per-kind fill level, effective retention, dropped writes, database size |
+| `GET` | `/pulse/api/lifecycle?range=…` | Process start/stop events (unclean restarts flagged), instance ID, and how far back data reaches |
 
 ### Profiling / flame graph
 
@@ -836,6 +903,7 @@ The simplest way to get started — mount Pulse with defaults:
 package main
 
 import (
+    "context"
     "log"
 
     "github.com/MUKE-coder/pulse/pulse"
@@ -848,10 +916,10 @@ func main() {
     db, _ := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
     router := gin.Default()
 
-    pulse.Mount(router, db, pulse.Config{
-        AppName: "Blog API",
-        DevMode: true,
-    })
+    pulse.Mount(context.Background(), router, db,
+        pulse.WithAppName("Blog API"),
+        pulse.WithDevMode(),
+    )
 
     router.GET("/", func(c *gin.Context) {
         c.JSON(200, gin.H{"message": "Hello, World!"})
@@ -866,7 +934,7 @@ func main() {
 Complete configuration with all options:
 
 ```go
-p := pulse.Mount(router, db, pulse.Config{
+p := pulse.Mount(ctx, router, db, pulse.WithConfig(pulse.Config{
     Prefix:  "/pulse",
     AppName: "Production API",
     DevMode: false,
@@ -925,7 +993,7 @@ p := pulse.Mount(router, db, pulse.Config{
     Prometheus: pulse.PrometheusConfig{
         Enabled: true,
     },
-})
+}))
 ```
 
 ### Custom Health Checks
@@ -933,7 +1001,7 @@ p := pulse.Mount(router, db, pulse.Config{
 Register checks for all your external dependencies:
 
 ```go
-p := pulse.Mount(router, db, cfg)
+p := pulse.Mount(ctx, router, db)
 
 // Redis
 p.AddHealthCheck(pulse.HealthCheck{
@@ -981,7 +1049,7 @@ p.AddHealthCheck(pulse.HealthCheck{
 Set up alerts with Slack and webhook notifications:
 
 ```go
-pulse.Mount(router, db, pulse.Config{
+pulse.Mount(ctx, router, db, pulse.WithConfig(pulse.Config{
     Alerts: pulse.AlertConfig{
         Slack: &pulse.SlackConfig{
             WebhookURL: "https://hooks.slack.com/services/T.../B.../xxx",
@@ -1008,7 +1076,7 @@ pulse.Mount(router, db, pulse.Config{
             },
         },
     },
-})
+}))
 ```
 
 Webhooks include an `X-Pulse-Signature` header with HMAC-SHA256 for verification and automatically retry 3 times with exponential backoff.
@@ -1018,7 +1086,7 @@ Webhooks include an `X-Pulse-Signature` header with HMAC-SHA256 for verification
 Track latency and availability of external services:
 
 ```go
-p := pulse.Mount(router, db, cfg)
+p := pulse.Mount(ctx, router, db)
 
 // Each wrapped client tracks metrics independently
 stripeClient := pulse.WrapHTTPClient(p, &http.Client{
@@ -1046,12 +1114,9 @@ Pulse tracks per-dependency: request count, error count, error rate, availabilit
 Enable the Prometheus endpoint and scrape it with Prometheus:
 
 ```go
-pulse.Mount(router, db, pulse.Config{
-    Prometheus: pulse.PrometheusConfig{
-        Enabled: true,
-        Path:    "/metrics",  // or default "/pulse/metrics"
-    },
-})
+pulse.Mount(ctx, router, db,
+    pulse.WithPrometheusPath("/metrics"), // or pulse.WithPrometheus() for the default "/pulse/metrics"
+)
 ```
 
 **prometheus.yml:**
@@ -1116,7 +1181,8 @@ scrape_configs:
 
 - **No CGo** — Uses `github.com/glebarez/sqlite` (pure Go SQLite driver) for maximum portability.
 - **Ring Buffers** — `RingBuffer[T]` appends in O(1) into a fixed-size slice (an atomic head index plus a short write lock), so memory stays bounded no matter how much traffic arrives.
-- **Async Storage** — All metric writes happen in goroutines to avoid blocking request handling.
+- **Non-blocking Storage** — Storing a metric is a ring-buffer push (Memory) or a queue append (SQLite, committed in batches by one writer), so the request path never waits on storage.
+- **Exact Counts** — Per-minute rollups of every request back totals, error rates, SLOs and load-test comparisons, independent of sampling and buffer size.
 - **Background Lifecycle** — All background goroutines are managed via `context.Context` + `sync.WaitGroup` for clean shutdown.
 - **Pointer Config Fields** — `*bool` and `*float64` config fields distinguish between "not set" (use default) and "explicitly set to zero/false".
 
@@ -1136,7 +1202,7 @@ cancel()
 p.Shutdown()
 ```
 
-Either way, all background goroutines (runtime sampler, aggregator, health runner, alert engine, WebSocket hub) stop. `Shutdown` additionally waits for them to finish and closes the storage backend, which flushes the SQLite database file cleanly.
+Either way, all background goroutines (runtime sampler, aggregator, health runner, alert engine, WebSocket hub) stop. `Shutdown` additionally waits for them to finish and closes the storage backend. With SQLite that commits the queued writes and the latest per-minute counts, and records a clean stop, so the next start isn't flagged as following a crash.
 
 ---
 
@@ -1144,11 +1210,13 @@ Either way, all background goroutines (runtime sampler, aggregator, health runne
 
 Pulse follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The current version is exposed as `pulse.Version`. Starting at **v1.0.0**, the public API surface defined in [STABILITY.md](STABILITY.md) is covered by semver guarantees — no breaking changes outside major releases, all removals preceded by at least one minor cycle of `// Deprecated:` notice.
 
-See [CHANGELOG.md](CHANGELOG.md) for the full release history; the short version of what is coming next:
+See [CHANGELOG.md](CHANGELOG.md) for the full release history. The short version of the plan:
 
 | Version | Theme |
 |---------|-------|
-| `v1.1.0` | Incremental Tailwind port of the original 8 dashboard pages; batched writes for the SQLite backend |
+| `v1.1.0` | Batched SQLite writes; exact per-minute counts; SLO fixes; configurable redaction; storage-capacity alerts; restart markers; load-test comparison; health-check isolation |
+| `v1.2.0` | Shared storage (Postgres) with leader election; log capture and correlation; OpenTelemetry export |
+| `v1.3.0` | Anomaly detection |
 
 ## License
 

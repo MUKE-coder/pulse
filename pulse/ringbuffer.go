@@ -51,6 +51,22 @@ func (rb *RingBuffer[T]) Push(item T) {
 	}
 }
 
+// oldest returns the oldest item in the buffer, if any.
+func (rb *RingBuffer[T]) oldest() (T, bool) {
+	rb.mu.RLock()
+	defer rb.mu.RUnlock()
+	var zero T
+	size := rb.size.Load()
+	switch {
+	case size == 0:
+		return zero, false
+	case size < rb.capacity:
+		return rb.data[0], true
+	default:
+		return rb.data[rb.head.Load()%rb.capacity], true
+	}
+}
+
 // Len returns the number of items currently in the buffer.
 func (rb *RingBuffer[T]) Len() int {
 	return int(rb.size.Load())

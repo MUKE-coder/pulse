@@ -1,9 +1,38 @@
 import { useState, useEffect } from 'react'
 import { useAPI } from '../hooks/useAPI'
 
+function fmtSeconds(s) {
+  if (s < 3600) return `${Math.round(s / 60)}m`
+  if (s < 86400) return `${(s / 3600).toFixed(1)}h`
+  return `${(s / 86400).toFixed(1)}d`
+}
+
+function fmtBytes(b) {
+  if (!b) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  const i = Math.min(units.length - 1, Math.floor(Math.log(b) / Math.log(1024)))
+  return `${(b / 1024 ** i).toFixed(i ? 1 : 0)} ${units[i]}`
+}
+
+// StorageSummary says whether buffer capacity, rather than the configured
+// retention, is limiting how much history Pulse keeps.
+function StorageSummary({ storage }) {
+  const limited = storage.retention_coverage < 1
+  const color = storage.retention_coverage < 0.5 ? '#f59e0b' : '#94a3b8'
+  return (
+    <p style={{ fontSize: 13, color: limited ? color : '#94a3b8' }}>
+      {storage.driver} backend, {storage.retention_hours}h retention.{' '}
+      {limited
+        ? `The ${storage.limited_by} buffer is full and holds only ${(storage.retention_coverage * 100).toFixed(0)}% of that — raise Storage.MemoryCapacity or switch to SQLite.`
+        : 'Every kind of data covers the full retention window.'}
+    </p>
+  )
+}
+
 export default function SettingsPage() {
   const { get, post } = useAPI()
   const [settings, setSettings] = useState(null)
+  const [storage, setStorage] = useState(null)
   const [exportType, setExportType] = useState('requests')
   const [exportFormat, setExportFormat] = useState('json')
   const [exportRange, setExportRange] = useState('1h')
@@ -16,6 +45,8 @@ export default function SettingsPage() {
       try {
         const res = await get('/settings')
         if (res.ok) setSettings(await res.json())
+        const st = await get('/storage')
+        if (st.ok) setStorage(await st.json())
       } catch {}
     }
     load()
@@ -137,6 +168,47 @@ export default function SettingsPage() {
           </button>
         </div>
       </Section>
+
+      {/* Storage capacity */}
+      {storage && (
+        <Section title="Storage">
+          <StorageSummary storage={storage} />
+          <table style={{ width: '100%', fontSize: 12.5, marginTop: 10, borderCollapse: 'collapse' }}>
+            <thead>
+              <tr style={{ color: '#64748b', textAlign: 'left' }}>
+                <th style={{ padding: '4px 0', fontWeight: 600 }}>Kind</th>
+                <th style={{ fontWeight: 600 }}>Stored</th>
+                <th style={{ fontWeight: 600 }}>Holds</th>
+                <th style={{ fontWeight: 600 }}>Notes</th>
+              </tr>
+            </thead>
+            <tbody>
+              {storage.kinds.map((k) => (
+                <tr key={k.kind} style={{ borderTop: '1px solid #16161e', color: '#e2e8f0' }}>
+                  <td style={{ padding: '5px 0', fontFamily: "'SF Mono', monospace" }}>{k.kind}</td>
+                  <td>
+                    {k.kind === 'database' ? fmtBytes(k.bytes)
+                      : k.kind === 'write_queue' ? `${k.stored.toLocaleString()} / ${k.capacity.toLocaleString()} queued`
+                      : `${k.stored.toLocaleString()}${k.capacity ? ` / ${k.capacity.toLocaleString()}` : ''}`}
+                  </td>
+                  <td style={{ color: k.full ? '#f59e0b' : '#94a3b8' }}>
+                    {k.kind === 'database' || k.kind === 'write_queue' ? '—'
+                      : k.full && k.effective_retention_seconds ? fmtSeconds(k.effective_retention_seconds)
+                      : 'full retention'}
+                  </td>
+                  <td style={{ color: '#94a3b8' }}>
+                    {[
+                      k.dropped ? `${k.dropped.toLocaleString()} dropped` : '',
+                      k.failed ? `${k.failed.toLocaleString()} failed` : '',
+                      k.free_bytes ? `${fmtBytes(k.free_bytes)} free on disk` : '',
+                    ].filter(Boolean).join(' · ')}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Section>
+      )}
 
       {/* Configuration Display */}
       {settings && (

@@ -7,20 +7,27 @@
 //     gymnastics.
 //   - WAL journal mode + busy_timeout=5000ms so concurrent readers don't
 //     trip writers under load.
-//   - Writes are synchronous (one row per call) in v1.0.0; high-throughput
-//     workloads should stay on [MemoryStorage] until batched writes land
-//     in a later release. The win is durability + cheap historical queries.
+//   - Metric writes (requests, queries, runtime samples, errors, health
+//     results, dependency calls, N+1 detections) are queued and committed
+//     by a single writer goroutine in batched transactions, so Store* calls
+//     never block the request path. When the queue is full the record is
+//     dropped and counted rather than blocking. Every read and every
+//     synchronous write flushes the queue first, so callers always read
+//     their own writes. A crash loses at most one flush interval.
 //   - One table per metric type. Errors are upserted by fingerprint so
 //     duplicate detections aggregate, mirroring MemoryStorage's behaviour.
 package pulse
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	// Side-effect import: registers the "sqlite" driver name with database/sql.
@@ -32,6 +39,7 @@ type SQLiteStorage struct {
 	db        *sql.DB
 	appName   string
 	startTime time.Time
+	path      string // database file, for size reporting; "" for in-memory
 
 	// Pool stats are tiny + frequently overwritten — keep the latest in
 	// memory rather than reading SQLite on every dashboard render.
@@ -42,11 +50,25 @@ type SQLiteStorage struct {
 	// automatically, but a Go-side mutex around explicit transactions
 	// avoids the SQLITE_BUSY retry loop entirely.
 	writeMu sync.Mutex
+
+	// Batched writer: metric writes queue here and runWriter commits them.
+	queue      chan sqliteWrite
+	flushReq   chan chan struct{}
+	writerDone chan struct{}
+	queueMu    sync.RWMutex // guards closed, so enqueue never sends on a closed queue
+	closed     bool
+	dropped    atomic.Int64 // writes dropped because the queue was full
+	failed     atomic.Int64 // writes that reached SQLite but failed
 }
 
 // NewSQLiteStorage opens (or creates) a SQLite database at dsn and prepares
 // the schema. Pass ":memory:" for an ephemeral database.
 func NewSQLiteStorage(dsn, appName string) (*SQLiteStorage, error) {
+	return openSQLiteStorage(dsn, appName, sqliteQueueSize)
+}
+
+// openSQLiteStorage is NewSQLiteStorage with a configurable write-queue size.
+func openSQLiteStorage(dsn, appName string, queueSize int) (*SQLiteStorage, error) {
 	if dsn == "" {
 		dsn = "pulse.db"
 	}
@@ -67,11 +89,150 @@ func NewSQLiteStorage(dsn, appName string) (*SQLiteStorage, error) {
 		return nil, err
 	}
 
-	return &SQLiteStorage{
-		db:        db,
-		appName:   appName,
-		startTime: time.Now(),
-	}, nil
+	s := &SQLiteStorage{
+		db:         db,
+		appName:    appName,
+		startTime:  time.Now(),
+		path:       sqliteFilePath(dsn),
+		queue:      make(chan sqliteWrite, queueSize),
+		flushReq:   make(chan chan struct{}),
+		writerDone: make(chan struct{}),
+	}
+	go s.runWriter()
+	return s, nil
+}
+
+// Batched writer tuning; see the design notes at the top of this file.
+const (
+	sqliteQueueSize     = 10000
+	sqliteBatchSize     = 500
+	sqliteFlushInterval = 250 * time.Millisecond
+)
+
+var (
+	errSQLiteQueueFull = errors.New("pulse/sqlite: write queue full, record dropped")
+	errSQLiteClosed    = errors.New("pulse/sqlite: storage is closed")
+)
+
+// sqliteWrite is one queued INSERT or UPSERT.
+type sqliteWrite struct {
+	query string
+	args  []any
+}
+
+// enqueue queues a metric write for the batch writer. It never blocks: when
+// the queue is full the write is dropped, counted, and errSQLiteQueueFull is
+// returned.
+func (s *SQLiteStorage) enqueue(query string, args ...any) error {
+	s.queueMu.RLock()
+	defer s.queueMu.RUnlock()
+	if s.closed {
+		return errSQLiteClosed
+	}
+	select {
+	case s.queue <- sqliteWrite{query: query, args: args}:
+		return nil
+	default:
+		s.dropped.Add(1)
+		return errSQLiteQueueFull
+	}
+}
+
+// sync blocks until every write queued before the call has been committed,
+// so a read (or a synchronous write) observes everything stored before it.
+// It must not be called while holding writeMu.
+func (s *SQLiteStorage) sync() {
+	ack := make(chan struct{})
+	select {
+	case s.flushReq <- ack:
+		<-ack
+	case <-s.writerDone:
+	}
+}
+
+// runWriter is the single goroutine that commits queued writes: when a batch
+// fills, when the flush interval elapses, and on sync requests. It exits
+// after draining the queue once Close closes it.
+func (s *SQLiteStorage) runWriter() {
+	defer close(s.writerDone)
+	ticker := time.NewTicker(sqliteFlushInterval)
+	defer ticker.Stop()
+
+	batch := make([]sqliteWrite, 0, sqliteBatchSize)
+	flush := func() {
+		s.commit(batch)
+		batch = batch[:0]
+	}
+	for {
+		select {
+		case w, ok := <-s.queue:
+			if !ok {
+				flush()
+				return
+			}
+			batch = append(batch, w)
+			if len(batch) >= sqliteBatchSize {
+				flush()
+			}
+		case <-ticker.C:
+			flush()
+		case ack := <-s.flushReq:
+			// Take everything already queued, then commit.
+		drain:
+			for {
+				select {
+				case w, ok := <-s.queue:
+					if !ok {
+						break drain
+					}
+					batch = append(batch, w)
+				default:
+					break drain
+				}
+			}
+			flush()
+			close(ack)
+		}
+	}
+}
+
+// commit writes batch in one transaction. A failed statement is counted and
+// skipped; it doesn't abort the rest of the batch.
+func (s *SQLiteStorage) commit(batch []sqliteWrite) {
+	if len(batch) == 0 {
+		return
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		s.failed.Add(int64(len(batch)))
+		return
+	}
+	stmts := make(map[string]*sql.Stmt)
+	for _, w := range batch {
+		st, ok := stmts[w.query]
+		if !ok {
+			if st, err = tx.Prepare(w.query); err != nil {
+				s.failed.Add(1)
+				continue
+			}
+			stmts[w.query] = st
+		}
+		if _, err := st.Exec(w.args...); err != nil {
+			s.failed.Add(1)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		s.failed.Add(int64(len(batch)))
+	}
+}
+
+// writeQueueStats reports the batch writer's queue depth and how many writes
+// were dropped (queue full) or failed since the storage was opened.
+func (s *SQLiteStorage) writeQueueStats() (depth int, dropped, failed int64) {
+	return len(s.queue), s.dropped.Load(), s.failed.Load()
 }
 
 func initSQLitePragmas(db *sql.DB) error {
@@ -216,6 +377,44 @@ CREATE TABLE IF NOT EXISTS test_runs (
 	metadata   TEXT    NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_test_runs_started ON test_runs (started_at);
+
+CREATE TABLE IF NOT EXISTS request_rollups (
+	minute     INTEGER NOT NULL,
+	method     TEXT    NOT NULL,
+	route      TEXT    NOT NULL,
+	total      INTEGER NOT NULL,
+	status_4xx INTEGER NOT NULL,
+	status_5xx INTEGER NOT NULL,
+	latency_ns INTEGER NOT NULL,
+	PRIMARY KEY (minute, method, route)
+);
+
+CREATE TABLE IF NOT EXISTS latency_rollups (
+	minute INTEGER PRIMARY KEY,
+	hist   BLOB    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS pulse_meta (
+	key   TEXT PRIMARY KEY,
+	value TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS lifecycle_events (
+	at               INTEGER NOT NULL,
+	type             TEXT    NOT NULL,
+	instance_id      TEXT    NOT NULL DEFAULT '',
+	previous_unclean INTEGER NOT NULL DEFAULT 0,
+	gap_from         INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_lifecycle_instance_at ON lifecycle_events (instance_id, at);
+
+CREATE TABLE IF NOT EXISTS slo_rollups (
+	minute INTEGER NOT NULL,
+	slo    TEXT    NOT NULL,
+	good   INTEGER NOT NULL,
+	total  INTEGER NOT NULL,
+	PRIMARY KEY (minute, slo)
+);
 `
 
 func initSQLiteSchema(db *sql.DB) error {
@@ -241,18 +440,16 @@ func firstLine(s string) string {
 // --- Request metrics ---
 
 func (s *SQLiteStorage) StoreRequest(m RequestMetric) error {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	_, err := s.db.Exec(
+	return s.enqueue(
 		`INSERT INTO requests (timestamp, method, path, status_code, latency_ns, request_size, response_size, client_ip, user_agent, error, trace_id)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.Timestamp.UnixNano(), m.Method, m.Path, m.StatusCode, int64(m.Latency),
 		m.RequestSize, m.ResponseSize, m.ClientIP, m.UserAgent, m.Error, m.TraceID,
 	)
-	return err
 }
 
 func (s *SQLiteStorage) GetRequests(f RequestFilter) ([]RequestMetric, error) {
+	s.sync()
 	var (
 		clauses []string
 		args    []any
@@ -366,18 +563,16 @@ func (s *SQLiteStorage) GetRouteDetail(method, path string, tr TimeRange) (*Rout
 // --- Query metrics ---
 
 func (s *SQLiteStorage) StoreQuery(m QueryMetric) error {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	_, err := s.db.Exec(
+	return s.enqueue(
 		`INSERT INTO queries (timestamp, sql_text, normalized_sql, duration_ns, rows_affected, error, operation, table_name, caller_file, caller_line, request_trace_id)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.Timestamp.UnixNano(), m.SQL, m.NormalizedSQL, int64(m.Duration),
 		m.RowsAffected, m.Error, m.Operation, m.Table, m.CallerFile, m.CallerLine, m.RequestTraceID,
 	)
-	return err
 }
 
 func (s *SQLiteStorage) GetSlowQueries(threshold time.Duration, limit int) ([]QueryMetric, error) {
+	s.sync()
 	q := `SELECT timestamp, sql_text, normalized_sql, duration_ns, rows_affected, error, operation, table_name, caller_file, caller_line, request_trace_id
 	      FROM queries WHERE duration_ns >= ? ORDER BY duration_ns DESC`
 	args := []any{int64(threshold)}
@@ -408,6 +603,7 @@ func (s *SQLiteStorage) GetSlowQueries(threshold time.Duration, limit int) ([]Qu
 }
 
 func (s *SQLiteStorage) GetQueryPatterns(tr TimeRange) ([]QueryPattern, error) {
+	s.sync()
 	rows, err := s.db.Query(
 		`SELECT normalized_sql, operation, table_name, COUNT(*) AS count,
 		        SUM(duration_ns) AS total, MAX(duration_ns) AS max,
@@ -442,18 +638,16 @@ func (s *SQLiteStorage) GetQueryPatterns(tr TimeRange) ([]QueryPattern, error) {
 }
 
 func (s *SQLiteStorage) StoreN1Detection(d N1Detection) error {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	_, err := s.db.Exec(
+	return s.enqueue(
 		`INSERT INTO n1_detections (detected_at, pattern, count, total_duration_ns, avg_duration_ns, request_trace_id, route, suggested_fix)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		d.DetectedAt.UnixNano(), d.Pattern, d.Count, int64(d.TotalDuration), int64(d.AvgDuration),
 		d.RequestTraceID, d.Route, d.SuggestedFix,
 	)
-	return err
 }
 
 func (s *SQLiteStorage) GetN1Detections(tr TimeRange) ([]N1Detection, error) {
+	s.sync()
 	rows, err := s.db.Query(
 		`SELECT detected_at, pattern, count, total_duration_ns, avg_duration_ns, request_trace_id, route, suggested_fix
 		 FROM n1_detections
@@ -503,18 +697,16 @@ func (s *SQLiteStorage) GetConnectionPoolStats() (*PoolStats, error) {
 // --- Runtime metrics ---
 
 func (s *SQLiteStorage) StoreRuntime(m RuntimeMetric) error {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	_, err := s.db.Exec(
+	return s.enqueue(
 		`INSERT INTO runtime_samples (timestamp, heap_alloc, heap_in_use, heap_objects, stack_in_use, total_alloc, sys, num_goroutine, gc_pause_ns, num_gc, gc_cpu_fraction)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.Timestamp.UnixNano(), m.HeapAlloc, m.HeapInUse, m.HeapObjects, m.StackInUse,
 		m.TotalAlloc, m.Sys, m.NumGoroutine, m.GCPauseNs, m.NumGC, m.GCCPUFraction,
 	)
-	return err
 }
 
 func (s *SQLiteStorage) GetRuntimeHistory(tr TimeRange) ([]RuntimeMetric, error) {
+	s.sync()
 	rows, err := s.db.Query(
 		`SELECT timestamp, heap_alloc, heap_in_use, heap_objects, stack_in_use, total_alloc, sys, num_goroutine, gc_pause_ns, num_gc, gc_cpu_fraction
 		 FROM runtime_samples
@@ -545,13 +737,10 @@ func (s *SQLiteStorage) GetRuntimeHistory(tr TimeRange) ([]RuntimeMetric, error)
 // --- Error records ---
 
 func (s *SQLiteStorage) StoreError(e ErrorRecord) error {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-
 	ctxJSON, _ := json.Marshal(e.RequestContext)
 
 	// UPSERT by fingerprint: increment count + bump last_seen on duplicate.
-	_, err := s.db.Exec(
+	return s.enqueue(
 		`INSERT INTO errors (fingerprint, id, method, route, error_message, error_type, stack_trace, request_ctx, count, first_seen, last_seen, muted, resolved)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
 		 ON CONFLICT (fingerprint) DO UPDATE SET
@@ -563,10 +752,10 @@ func (s *SQLiteStorage) StoreError(e ErrorRecord) error {
 		e.Fingerprint, e.ID, e.Method, e.Route, e.ErrorMessage, e.ErrorType,
 		e.StackTrace, string(ctxJSON), e.Count, e.FirstSeen.UnixNano(), e.LastSeen.UnixNano(),
 	)
-	return err
 }
 
 func (s *SQLiteStorage) GetErrors(f ErrorFilter) ([]ErrorRecord, error) {
+	s.sync()
 	var (
 		clauses []string
 		args    []any
@@ -649,6 +838,7 @@ func (s *SQLiteStorage) GetErrorGroups(tr TimeRange) ([]ErrorGroup, error) {
 }
 
 func (s *SQLiteStorage) GetErrorByID(id string) (*ErrorRecord, error) {
+	s.sync()
 	row := s.db.QueryRow(
 		`SELECT fingerprint, id, method, route, error_message, error_type, stack_trace, request_ctx, count, first_seen, last_seen, muted, resolved FROM errors WHERE id = ?`,
 		id,
@@ -664,6 +854,7 @@ func (s *SQLiteStorage) GetErrorByID(id string) (*ErrorRecord, error) {
 }
 
 func (s *SQLiteStorage) UpdateError(id string, updates map[string]interface{}) error {
+	s.sync()
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	var (
@@ -697,6 +888,7 @@ func (s *SQLiteStorage) UpdateError(id string, updates map[string]interface{}) e
 }
 
 func (s *SQLiteStorage) DeleteError(id string) error {
+	s.sync()
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	res, err := s.db.Exec(`DELETE FROM errors WHERE id = ?`, id)
@@ -742,18 +934,16 @@ func scanErrorRow(r rowScanner) (ErrorRecord, error) {
 // --- Health results ---
 
 func (s *SQLiteStorage) StoreHealthResult(r HealthCheckResult) error {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
 	meta, _ := json.Marshal(r.Metadata)
-	_, err := s.db.Exec(
+	return s.enqueue(
 		`INSERT INTO health_results (timestamp, name, type, status, latency_ns, error, metadata)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		r.Timestamp.UnixNano(), r.Name, r.Type, r.Status, int64(r.Latency), r.Error, string(meta),
 	)
-	return err
 }
 
 func (s *SQLiteStorage) GetHealthHistory(name string, limit int) ([]HealthCheckResult, error) {
+	s.sync()
 	q := `SELECT timestamp, name, type, status, latency_ns, error, metadata
 	      FROM health_results WHERE name = ? ORDER BY timestamp DESC`
 	args := []any{name}
@@ -787,6 +977,7 @@ func (s *SQLiteStorage) GetHealthHistory(name string, limit int) ([]HealthCheckR
 }
 
 func (s *SQLiteStorage) GetLatestHealthResults() map[string]HealthCheckResult {
+	s.sync()
 	rows, err := s.db.Query(
 		`SELECT h.timestamp, h.name, h.type, h.status, h.latency_ns, h.error, h.metadata
 		 FROM health_results h
@@ -896,18 +1087,16 @@ func (s *SQLiteStorage) GetAlerts(f AlertFilter) ([]AlertRecord, error) {
 // --- Dependencies ---
 
 func (s *SQLiteStorage) StoreDependencyMetric(m DependencyMetric) error {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	_, err := s.db.Exec(
+	return s.enqueue(
 		`INSERT INTO dependencies (timestamp, name, method, url, status_code, latency_ns, request_size, response_size, error)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.Timestamp.UnixNano(), m.Name, m.Method, m.URL, m.StatusCode,
 		int64(m.Latency), m.RequestSize, m.ResponseSize, m.Error,
 	)
-	return err
 }
 
 func (s *SQLiteStorage) GetDependencyStats(tr TimeRange) ([]DependencyStats, error) {
+	s.sync()
 	rows, err := s.db.Query(
 		`SELECT timestamp, name, status_code, latency_ns, error
 		 FROM dependencies WHERE timestamp BETWEEN ? AND ?`,
@@ -1118,6 +1307,7 @@ func (s *SQLiteStorage) GetOverview(tr TimeRange) (*Overview, error) {
 func (s *SQLiteStorage) Cleanup(retention time.Duration) error {
 	cutoff := time.Now().Add(-retention).UnixNano()
 
+	s.sync()
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
@@ -1133,6 +1323,7 @@ func (s *SQLiteStorage) Cleanup(retention time.Duration) error {
 		{"n1_detections", "detected_at"},
 		{"alerts", "fired_at"},
 		{"errors", "last_seen"},
+		{"lifecycle_events", "at"},
 	}
 	for _, d := range deletes {
 		if _, err := s.db.Exec(
@@ -1152,11 +1343,13 @@ func (s *SQLiteStorage) Cleanup(retention time.Duration) error {
 }
 
 func (s *SQLiteStorage) Reset() error {
+	s.sync()
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
 	tables := []string{"requests", "queries", "runtime_samples", "errors",
-		"health_results", "alerts", "dependencies", "n1_detections", "test_runs"}
+		"health_results", "alerts", "dependencies", "n1_detections", "test_runs",
+		"request_rollups", "latency_rollups", "slo_rollups"}
 	for _, t := range tables {
 		if _, err := s.db.Exec(`DELETE FROM ` + t); err != nil {
 			return fmt.Errorf("pulse/sqlite reset %s: %w", t, err)
@@ -1170,7 +1363,21 @@ func (s *SQLiteStorage) Reset() error {
 	return nil
 }
 
+// ping checks the database answers; used by the pulse_storage health check.
+func (s *SQLiteStorage) ping(ctx context.Context) error {
+	return s.db.PingContext(ctx)
+}
+
+// Close commits every queued write, stops the writer, and closes the
+// database. Store calls after Close return errSQLiteClosed.
 func (s *SQLiteStorage) Close() error {
+	s.queueMu.Lock()
+	if !s.closed {
+		s.closed = true
+		close(s.queue)
+	}
+	s.queueMu.Unlock()
+	<-s.writerDone
 	return s.db.Close()
 }
 

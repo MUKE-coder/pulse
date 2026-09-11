@@ -29,6 +29,20 @@ type Pulse struct {
 	storage   Storage
 	startTime time.Time
 
+	// now is the clock used by time-window evaluation (SLOs, rollups).
+	// Tests replace it before starting background work.
+	now func() time.Time
+
+	// rollups holds unsampled per-minute request tallies (see rollup.go).
+	rollups *rollups
+
+	// redactor strips secrets from captured request context, error
+	// messages and dependency URLs (see redact.go).
+	redactor *redactor
+
+	// internal counts failures inside Pulse itself (see internal.go).
+	internal internalErrors
+
 	// GORM plugin
 	gormPlugin *PulsePlugin
 
@@ -81,6 +95,9 @@ func newPulse(parent context.Context, cfg Config) *Pulse {
 	p := &Pulse{
 		config:       cfg,
 		startTime:    time.Now(),
+		now:          time.Now,
+		redactor:     newRedactor(cfg.Errors.Redaction),
+		rollups:      newRollups(time.Duration(cfg.Storage.RetentionHours)*time.Hour, cfg.SLOs, time.Now()),
 		healthChecks: make([]HealthCheck, 0),
 		ctx:          ctx,
 		cancel:       cancel,

@@ -75,25 +75,20 @@ func (t *instrumentedTransport) RoundTrip(req *http.Request) (*http.Response, er
 	metric := DependencyMetric{
 		Name:        t.name,
 		Method:      req.Method,
-		URL:         redactURL(req.URL),
+		URL:         t.pulse.redactor.url(req.URL),
 		Latency:     latency,
 		RequestSize: req.ContentLength,
 		Timestamp:   start,
 	}
 
 	if err != nil {
-		metric.Error = err.Error()
+		metric.Error = t.pulse.redactor.errorText(err)
 	} else {
 		metric.StatusCode = resp.StatusCode
 		metric.ResponseSize = resp.ContentLength
 	}
 
-	// Store asynchronously
-	go func() {
-		if storeErr := t.pulse.storage.StoreDependencyMetric(metric); storeErr != nil && t.pulse.config.DevMode {
-			t.pulse.logger.Printf("[pulse] failed to store dependency metric: %v", storeErr)
-		}
-	}()
+	t.pulse.internalError("storage: dependencies", t.pulse.storage.StoreDependencyMetric(metric))
 
 	return resp, err
 }

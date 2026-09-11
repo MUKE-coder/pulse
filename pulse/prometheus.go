@@ -41,10 +41,24 @@ func buildPrometheusMetrics(p *Pulse) string {
 	// --- Database Metrics ---
 	writeDatabaseMetrics(&b, p, tr)
 
+	// --- Storage capacity ---
+	writeStorageMetrics(&b, p)
+
+	// --- Pulse's own failures ---
+	writeInternalMetrics(&b, p)
+
 	// --- Uptime ---
 	fmt.Fprintf(&b, "# HELP pulse_uptime_seconds Pulse uptime in seconds\n")
 	fmt.Fprintf(&b, "# TYPE pulse_uptime_seconds gauge\n")
 	fmt.Fprintf(&b, "pulse_uptime_seconds %.0f\n\n", p.Uptime().Seconds())
+
+	// --- Identity ---
+	// Prometheus sets its own `instance` label on every scrape, so the
+	// Pulse instance ID goes on an info metric instead.
+	fmt.Fprintf(&b, "# HELP pulse_build_info Pulse version, instance ID and storage backend\n")
+	fmt.Fprintf(&b, "# TYPE pulse_build_info gauge\n")
+	fmt.Fprintf(&b, "pulse_build_info{version=%q,instance_id=%q,storage=%q} 1\n\n",
+		Version, p.config.InstanceID, storageDriverName(p.config.Storage.Driver))
 
 	return b.String()
 }

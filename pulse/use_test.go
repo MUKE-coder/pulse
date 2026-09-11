@@ -102,9 +102,11 @@ func TestUSEAPIEndpoint(t *testing.T) {
 		t.Fatal("USE sampler should be enabled by default")
 	}
 
-	// The first sample takes ~1s because cpu.Percent blocks for its window.
-	// Wait until the snapshot is populated before hitting the endpoint.
-	deadline := time.Now().Add(3 * time.Second)
+	// The first sample takes ~1s because cpu.Percent blocks for its window,
+	// and much longer when the rest of the suite is sampling the host at the
+	// same time. Wait until the snapshot is populated before hitting the
+	// endpoint; the loop exits as soon as it is.
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if len(p.useSampler.Snapshot().Resources) > 0 {
 			break

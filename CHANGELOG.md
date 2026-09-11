@@ -7,6 +7,169 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.0] — Unreleased
+
+Minor release: the v1.1 part of the follow-up plan to the v1.0.0 code
+review. API changes are additive only (see "API additions"). Three default
+behaviours changed; see "Changed".
+
+### Added — exact counts regardless of sampling
+
+- Per-minute rollups of every request, recorded before the sampling
+  decision: counts, 4xx/5xx, a latency histogram (buckets at most 6.25%
+  wide), and good/total events per SLO. Overview totals, error rates and
+  RPM, per-route counts, the `error_rate` alert rule, SLOs and load-test
+  comparisons now use them. Before this, with `SampleRate` below 1, stored
+  requests over-represented errors (which are always kept) — about 10× at
+  0.1 — and a 30-day SLO on the Memory backend saw only the last 100,000
+  requests.
+- With SQLite, rollups are saved every 30 s and restored at startup.
+
+### Added — SLOs
+
+- Multiwindow burn-rate alerts: `BurnRateAlert.ShortWindow` (default
+  Window/12; the defaults are 1h/5m and 6h/30m) must also be burning for
+  an alert to fire, so alerts resolve soon after a burn stops.
+- `BurnRateAlert.MinEvents` (default 20): the window must hold this many
+  events before an alert fires, so a few requests right after a deploy or
+  restart can't page.
+- `SLOStatus.DataCoverage` and, per window, `ShortWindow`, `ShortBurnRate`,
+  `Events`, `MinEvents` and `DataCoverage`, all shown on the SLOs page.
+- Alerts still firing at shutdown are restored at startup, for SLO and
+  threshold rules alike. A restart neither pages again nor strands the
+  open record.
+
+### Added — SQLite batched writes
+
+- Metric writes are queued and committed by a single writer in batches
+  (500 rows or 250 ms). Stores never block; when the queue is full, the
+  record is dropped and counted. Reads and synchronous writes flush the
+  queue first. `Close` commits everything still queued.
+- The per-record goroutines in the tracing middleware, error middleware,
+  GORM plugin and HTTP client wrapper are gone: both backends store without
+  blocking.
+
+### Added — restarts and storage capacity
+
+- Lifecycle events:
+  - A start and a stop event per process. With SQLite, a start that
+    follows an unclean shutdown is flagged, with the time of the last data
+    recorded before it.
+  - `GET /pulse/api/lifecycle` returns the events.
+  - The dashboard shows restart markers and a data-gap banner.
+  - In production, Pulse logs a startup note when using Memory storage.
+- `GET /pulse/api/storage` reports each kind's fill level and effective
+  retention, dropped and failed writes, database size and free disk. The
+  Settings page shows it as a card.
+- Built-in alert rules `storage_retention_limited` (a full buffer holds
+  less than 50% of `RetentionHours` for 15 minutes) and
+  `storage_writes_dropped`.
+- `StorageConfig.MemoryCapacity` / `WithMemoryCapacity` size the Memory
+  ring buffers. The runtime buffer now defaults to enough samples to cover
+  `RetentionHours`; the old fixed 10,000 samples covered about 14 hours at
+  5 s.
+- Prometheus: `pulse_storage_records`,
+  `pulse_storage_effective_retention_seconds`,
+  `pulse_storage_retention_coverage_ratio`,
+  `pulse_storage_dropped_writes_total`, `pulse_internal_errors_total` and
+  `pulse_build_info`.
+
+### Added — load-test overlay
+
+- Test runs are drawn as labelled bands on the Overview and Runtime charts,
+  which now use a real time axis.
+- `GET /pulse/api/test-runs/:id/compare` returns requests, RPS, 5xx rate
+  and p50/p95/p99 before, during and after a run, whether it degraded, and
+  the time to recovery. It is shown under **Compare** on the Test Runs
+  page.
+
+### Added — configurable redaction
+
+- `ErrorConfig.Redaction` (`RedactionConfig`) adds extra field names,
+  substring stems, headers and value patterns, a `DisableDefaults` switch
+  and a last-mile `Hook`. Options: `WithRedactFields`, `WithRedactHeaders`,
+  `WithRedactValuePatterns`, `WithRedactor`.
+- Built-in detectors find secrets inside any text: Luhn-valid card numbers,
+  JWTs, `Bearer` tokens, AWS access keys and private keys. They apply to
+  body values, header values, the path, query and form values, error
+  messages, and outbound URLs and their errors.
+- Error messages are scrubbed before fingerprinting, so values redacted from
+  a message don't split one error into many groups.
+- Error records stored by v1.0.0 are re-redacted once, the first time v1.1
+  opens an SQLite database. A `pulse_meta` table records that it ran.
+
+### Added — multi-instance basics
+
+- `Config.InstanceID` / `WithInstanceID` (default: the hostname), shown on
+  lifecycle events, the dashboard header and `pulse_build_info`.
+- A README section on running replicas, and `examples/multi-instance` (two
+  replicas behind Caddy).
+
+### Fixed
+
+- **Secrets in stored error text.** Three kinds of error text were stored
+  unscrubbed:
+  - the request metric's copy of the handler's error message
+  - GORM query errors
+  - outbound request errors, whose `*url.Error` text embeds the full URL,
+    credentials included
+- **`SecretKeyFile` race.** Replicas starting at once against a shared key
+  file could each generate a different key. Creation is now atomic: a hard
+  link, with an exclusive-create fallback.
+- **Health checks.** They ran one after another in a single goroutine, so a
+  check that ignored its context blocked every other check and froze the
+  composite status, and `HealthCheck.Interval` was ignored. Now:
+  - checks run concurrently, each on its own interval
+  - Pulse enforces the timeouts
+  - a stuck check isn't started again
+  - a panicking check fails instead of crashing the process
+- The public health endpoints answer from results held in memory rather
+  than reading storage.
+- **Storage write failures** were logged only in DevMode. They are now
+  counted per component, logged at most once a minute, and exported. With
+  SQLite, a new non-critical `pulse_storage` health check also reports
+  them.
+- **Notifications.**
+  - Email had no timeouts (`net/smtp` has none), so a silent mail server
+    could hang the sender.
+  - Notifications now go through a bounded queue.
+  - Webhook failures are logged without the URL, because chat webhook
+    URLs are credentials.
+- In-flight test runs showed a negative duration on the Test Runs page.
+- The Tailwind-styled pages (SLOs, USE, Test Runs, Flame Graph) lost all
+  padding and margins. An unlayered CSS reset in the dashboard overrode
+  Tailwind 4's layered utilities; the base styles now live in `@layer base`.
+
+### Changed
+
+- Two new built-in alert rules (see above). Override them by name, like any
+  default rule.
+- A burn-rate alert now needs both of its windows over the threshold and at
+  least 20 events. Set `ShortWindow` and `MinEvents` explicitly to change
+  this.
+- With the SQLite backend, the health check list gains `pulse_storage`;
+  while it fails, the composite status is `degraded`.
+
+### API additions
+
+`RedactionConfig`, `ErrorConfig.Redaction`, `MemoryCapacity`,
+`StorageConfig.MemoryCapacity`, `Config.InstanceID`,
+`BurnRateAlert.ShortWindow`, `BurnRateAlert.MinEvents`,
+`SLOStatus.DataCoverage`, new `BurnWindowStatus` fields, and the options
+`WithRedactFields`, `WithRedactHeaders`, `WithRedactValuePatterns`,
+`WithRedactor`, `WithMemoryCapacity` and `WithInstanceID`. No existing
+exported identifier changed.
+
+### Known limitations
+
+- Latency percentiles in route stats (the Routes page) still come from the
+  stored requests. When `SampleRate` is below 1, those over-represent slow
+  and failed requests.
+- Instance IDs are not yet stamped on individual records; that arrives with
+  shared storage in v1.2.
+
+---
+
 ## [1.0.1] — Unreleased
 
 Patch release fixing correctness and privacy bugs found in a code review of

@@ -1,9 +1,9 @@
 // Pulse ↔ k6 bridge.
 //
 // Drop this file into your k6 test directory and import the helpers below
-// to record your k6 runs in Pulse. Runs appear on the dashboard's Test Runs
-// page and from GET /pulse/api/test-runs. Drawing them as bands on the
-// timeline charts is planned for v1.1.
+// to record your k6 runs in Pulse. Each run appears as a labelled band on the
+// dashboard's timeline charts, and the Test Runs page compares production
+// traffic before, during and after it (GET /pulse/api/test-runs/:id/compare).
 //
 // Usage in your k6 script:
 //

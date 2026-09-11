@@ -5,6 +5,11 @@ import StatCard from '../components/StatCard'
 import DataTable from '../components/DataTable'
 import StatusBadge from '../components/StatusBadge'
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
+import {
+  DataBanner, fmtClock, overlayElements, timeAxisProps, timeDomain, useTimelineOverlays,
+} from '../components/TimelineOverlays'
+
+const RANGE = '1h'
 
 function fmt(ms) {
   if (ms < 1) return `${(ms * 1000).toFixed(0)}us`
@@ -17,15 +22,42 @@ function fmtDuration(ns) {
   return fmt(ms)
 }
 
+const toPoints = (series) => (series || []).map((p) => ({ ts: new Date(p.timestamp).getTime(), value: p.value }))
+
+function TimelineChart({ title, data, color, gradientId, overlays }) {
+  return (
+    <div style={{ background: '#111118', border: '1px solid #1e1e2e', borderRadius: 8, padding: 16 }}>
+      <h3 style={{ fontSize: 13, color: '#64748b', marginBottom: 12, fontWeight: 600 }}>{title}</h3>
+      <ResponsiveContainer width="100%" height={180}>
+        <AreaChart data={data}>
+          <defs><linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="5%" stopColor={color} stopOpacity={0.3}/>
+            <stop offset="95%" stopColor={color} stopOpacity={0}/>
+          </linearGradient></defs>
+          <XAxis {...timeAxisProps} />
+          <YAxis tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickLine={false} width={40} />
+          <Tooltip
+            labelFormatter={fmtClock}
+            contentStyle={{ background: '#16161e', border: '1px solid #2a2a3e', borderRadius: 6, fontSize: 12 }}
+          />
+          {overlayElements(overlays, timeDomain(data))}
+          <Area type="monotone" dataKey="value" stroke={color} fill={`url(#${gradientId})`} strokeWidth={2} />
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
+  )
+}
+
 export default function Dashboard() {
   const { get } = useAPI()
   const [overview, setOverview] = useState(null)
   const [loading, setLoading] = useState(true)
   const { lastMessage } = useWebSocket(['overview'])
+  const overlays = useTimelineOverlays(RANGE)
 
   const fetchData = async () => {
     try {
-      const res = await get('/overview?range=1h')
+      const res = await get(`/overview?range=${RANGE}`)
       if (res.ok) setOverview(await res.json())
     } catch {}
     setLoading(false)
@@ -42,16 +74,6 @@ export default function Dashboard() {
   if (loading) return <div style={{ color: '#64748b', padding: 40 }}>Loading...</div>
 
   const o = overview || {}
-
-  const throughputData = (o.throughput_series || []).map((p) => ({
-    time: new Date(p.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    value: p.value,
-  }))
-
-  const errorData = (o.error_series || []).map((p) => ({
-    time: new Date(p.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    value: p.value,
-  }))
 
   const routeCols = [
     { key: 'method', label: 'Method', render: (v) => (
@@ -85,10 +107,15 @@ export default function Dashboard() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
         <div>
           <h1 style={{ fontSize: 22, fontWeight: 700, color: '#e2e8f0' }}>{o.app_name || 'Pulse'}</h1>
-          <p style={{ color: '#64748b', fontSize: 13, marginTop: 2 }}>Uptime: {o.uptime || '-'}</p>
+          <p style={{ color: '#64748b', fontSize: 13, marginTop: 2 }}>
+            Uptime: {o.uptime || '-'}
+            {overlays.lifecycle?.instance_id && <> · instance <span style={{ color: '#94a3b8' }}>{overlays.lifecycle.instance_id}</span></>}
+          </p>
         </div>
         <StatusBadge status={o.health_status || 'healthy'} />
       </div>
+
+      <DataBanner lifecycle={overlays.lifecycle} range={RANGE} />
 
       {/* KPI Cards */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14, marginBottom: 20 }}>
@@ -98,38 +125,10 @@ export default function Dashboard() {
         <StatCard label="Goroutines" value={o.active_goroutines || '0'} sub={`Heap: ${o.heap_alloc_mb?.toFixed(1) || '0'} MB`} color="#22c55e" />
       </div>
 
-      {/* Charts */}
+      {/* Charts — test runs appear as shaded bands, restarts as dashed lines */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 20 }}>
-        <div style={{ background: '#111118', border: '1px solid #1e1e2e', borderRadius: 8, padding: 16 }}>
-          <h3 style={{ fontSize: 13, color: '#64748b', marginBottom: 12, fontWeight: 600 }}>THROUGHPUT (RPM)</h3>
-          <ResponsiveContainer width="100%" height={180}>
-            <AreaChart data={throughputData}>
-              <defs><linearGradient id="tg" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="#6366f1" stopOpacity={0.3}/>
-                <stop offset="95%" stopColor="#6366f1" stopOpacity={0}/>
-              </linearGradient></defs>
-              <XAxis dataKey="time" tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickLine={false} width={40} />
-              <Tooltip contentStyle={{ background: '#16161e', border: '1px solid #2a2a3e', borderRadius: 6, fontSize: 12 }} />
-              <Area type="monotone" dataKey="value" stroke="#6366f1" fill="url(#tg)" strokeWidth={2} />
-            </AreaChart>
-          </ResponsiveContainer>
-        </div>
-        <div style={{ background: '#111118', border: '1px solid #1e1e2e', borderRadius: 8, padding: 16 }}>
-          <h3 style={{ fontSize: 13, color: '#64748b', marginBottom: 12, fontWeight: 600 }}>ERRORS</h3>
-          <ResponsiveContainer width="100%" height={180}>
-            <AreaChart data={errorData}>
-              <defs><linearGradient id="eg" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="#ef4444" stopOpacity={0.3}/>
-                <stop offset="95%" stopColor="#ef4444" stopOpacity={0}/>
-              </linearGradient></defs>
-              <XAxis dataKey="time" tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickLine={false} width={40} />
-              <Tooltip contentStyle={{ background: '#16161e', border: '1px solid #2a2a3e', borderRadius: 6, fontSize: 12 }} />
-              <Area type="monotone" dataKey="value" stroke="#ef4444" fill="url(#eg)" strokeWidth={2} />
-            </AreaChart>
-          </ResponsiveContainer>
-        </div>
+        <TimelineChart title="THROUGHPUT (RPM)" data={toPoints(o.throughput_series)} color="#6366f1" gradientId="tg" overlays={overlays} />
+        <TimelineChart title="ERRORS" data={toPoints(o.error_series)} color="#ef4444" gradientId="eg" overlays={overlays} />
       </div>
 
       {/* Top Routes */}

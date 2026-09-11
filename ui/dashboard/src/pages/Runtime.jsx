@@ -3,6 +3,9 @@ import { useAPI } from '../hooks/useAPI'
 import { useWebSocket } from '../hooks/useWebSocket'
 import StatCard from '../components/StatCard'
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from 'recharts'
+import {
+  DataBanner, fmtClock, overlayElements, timeAxisProps, timeDomain, useTimelineOverlays,
+} from '../components/TimelineOverlays'
 
 function fmtBytes(b) {
   if (!b) return '0 B'
@@ -12,6 +15,8 @@ function fmtBytes(b) {
   return `${(b / 1073741824).toFixed(2)} GB`
 }
 
+const tooltipStyle = { background: '#16161e', border: '1px solid #2a2a3e', borderRadius: 6, fontSize: 12 }
+
 export default function RuntimePage() {
   const { get } = useAPI()
   const [current, setCurrent] = useState(null)
@@ -20,6 +25,7 @@ export default function RuntimePage() {
   const [range, setRange] = useState('1h')
   const [loading, setLoading] = useState(true)
   const { lastMessage } = useWebSocket(['runtime'])
+  const overlays = useTimelineOverlays(range)
 
   const fetchData = async () => {
     try {
@@ -48,12 +54,13 @@ export default function RuntimePage() {
   const r = current || {}
 
   const chartData = (history || []).map((h) => ({
-    time: new Date(h.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    ts: new Date(h.timestamp).getTime(),
     heap: (h.heap_alloc || 0) / 1048576,
     heapInUse: (h.heap_in_use || 0) / 1048576,
     goroutines: h.num_goroutine || 0,
     gcPause: (h.gc_pause_ns || 0) / 1e6,
   }))
+  const domain = timeDomain(chartData)
 
   return (
     <div>
@@ -68,6 +75,8 @@ export default function RuntimePage() {
         </select>
       </div>
 
+      <DataBanner lifecycle={overlays.lifecycle} range={range} />
+
       {/* KPI Cards */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14, marginBottom: 20 }}>
         <StatCard label="Heap Alloc" value={fmtBytes(r.heap_alloc)} color="#818cf8" />
@@ -81,10 +90,11 @@ export default function RuntimePage() {
         <h3 style={{ fontSize: 13, color: '#64748b', marginBottom: 12, fontWeight: 600 }}>MEMORY (MB)</h3>
         <ResponsiveContainer width="100%" height={220}>
           <LineChart data={chartData}>
-            <XAxis dataKey="time" tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickLine={false} />
+            <XAxis {...timeAxisProps} />
             <YAxis tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickLine={false} width={50} />
-            <Tooltip contentStyle={{ background: '#16161e', border: '1px solid #2a2a3e', borderRadius: 6, fontSize: 12 }} />
+            <Tooltip labelFormatter={fmtClock} contentStyle={tooltipStyle} />
             <Legend wrapperStyle={{ fontSize: 12 }} />
+            {overlayElements(overlays, domain)}
             <Line type="monotone" dataKey="heap" name="Heap Alloc" stroke="#6366f1" strokeWidth={2} dot={false} />
             <Line type="monotone" dataKey="heapInUse" name="Heap In Use" stroke="#8b5cf6" strokeWidth={2} dot={false} />
           </LineChart>
@@ -96,9 +106,10 @@ export default function RuntimePage() {
         <h3 style={{ fontSize: 13, color: '#64748b', marginBottom: 12, fontWeight: 600 }}>GOROUTINES</h3>
         <ResponsiveContainer width="100%" height={180}>
           <LineChart data={chartData}>
-            <XAxis dataKey="time" tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickLine={false} />
+            <XAxis {...timeAxisProps} />
             <YAxis tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickLine={false} width={50} />
-            <Tooltip contentStyle={{ background: '#16161e', border: '1px solid #2a2a3e', borderRadius: 6, fontSize: 12 }} />
+            <Tooltip labelFormatter={fmtClock} contentStyle={tooltipStyle} />
+            {overlayElements(overlays, domain)}
             <Line type="monotone" dataKey="goroutines" stroke="#22c55e" strokeWidth={2} dot={false} />
           </LineChart>
         </ResponsiveContainer>

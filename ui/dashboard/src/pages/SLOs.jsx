@@ -91,6 +91,13 @@ export default function SLOs() {
               </span>
             </header>
 
+            {s.data_coverage < 1 && (
+              <p className="text-xs text-amber-300/90 mb-3">
+                Pulse holds data for {(s.data_coverage * 100).toFixed(0)}% of this {s.window} window so far —
+                compliance covers only that part.
+              </p>
+            )}
+
             <div className="grid grid-cols-4 gap-4 mb-4 text-sm">
               <Stat label="Target"        value={`${(s.target * 100).toFixed(2)}%`} />
               <Stat label="Compliance"    value={`${(s.compliance * 100).toFixed(3)}%`} />
@@ -114,18 +121,21 @@ export default function SLOs() {
                 {(s.burn_windows || []).map((w) => (
                   <div key={w.name} className="grid grid-cols-12 items-center gap-2 text-xs">
                     <div className="col-span-2 text-slate-300 font-medium">{w.name}</div>
-                    <div className="col-span-2 text-slate-500">{w.window}</div>
-                    <div className="col-span-3 text-slate-400">
-                      compliance <span className="font-mono text-slate-200">{(w.compliance * 100).toFixed(2)}%</span>
+                    <div className="col-span-2 text-slate-500">{w.window} <span className="text-slate-600">/ {w.short_window}</span></div>
+                    <div className="col-span-2 text-slate-400">
+                      <span className="font-mono text-slate-200">{(w.compliance * 100).toFixed(2)}%</span>
                     </div>
-                    <div className="col-span-3 text-slate-400">
+                    <div className="col-span-4 text-slate-400">
                       burn <span className={`font-mono ${w.firing ? 'text-red-400' : 'text-slate-200'}`}>{w.burn_rate?.toFixed(2)}×</span>
+                      <span className="text-slate-500"> · short {w.short_burn_rate?.toFixed(2)}×</span>
                       <span className="text-slate-600"> / threshold {w.threshold}×</span>
                     </div>
                     <div className="col-span-2 text-right">
                       {w.firing
                         ? <span className="text-red-400 font-medium">FIRING</span>
-                        : <span className="text-emerald-400">ok</span>}
+                        : w.events < w.min_events
+                          ? <span className="text-slate-500" title="Not enough traffic in the window to alert yet">{w.events}/{w.min_events} events</span>
+                          : <span className="text-emerald-400">ok</span>}
                     </div>
                   </div>
                 ))}

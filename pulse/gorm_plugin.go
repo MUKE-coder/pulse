@@ -152,7 +152,8 @@ func (p *PulsePlugin) afterCallback(db *gorm.DB) {
 	// Get error message
 	var errMsg string
 	if db.Error != nil && db.Error != gorm.ErrRecordNotFound {
-		errMsg = db.Error.Error()
+		// Database errors can quote the offending values.
+		errMsg = p.pulse.redactor.scrubValue(db.Error.Error())
 	}
 
 	// Get caller info
@@ -183,12 +184,7 @@ func (p *PulsePlugin) afterCallback(db *gorm.DB) {
 		Timestamp:      startTime,
 	}
 
-	// Store asynchronously
-	go func() {
-		if err := p.pulse.storage.StoreQuery(metric); err != nil && p.pulse.config.DevMode {
-			p.pulse.logger.Printf("[pulse] failed to store query metric: %v", err)
-		}
-	}()
+	p.pulse.internalError("storage: queries", p.pulse.storage.StoreQuery(metric))
 
 	// N+1 detection
 	if boolValue(cfg.DetectN1) && traceID != "" && normalized.Normalized != "" {
@@ -274,9 +270,7 @@ func (p *PulsePlugin) emitN1(traceID, route string, tr *n1Trace) {
 			DetectedAt:     now,
 		}
 
-		if err := p.pulse.storage.StoreN1Detection(detection); err != nil && p.pulse.config.DevMode {
-			p.pulse.logger.Printf("[pulse] failed to store N+1 detection: %v", err)
-		}
+		p.pulse.internalError("storage: n+1 detections", p.pulse.storage.StoreN1Detection(detection))
 
 		if p.pulse.config.DevMode {
 			if route != "" {
@@ -358,9 +352,7 @@ func (p *PulsePlugin) startPoolMonitoring(db *gorm.DB) {
 					MaxLifetimeClosed:  stats.MaxLifetimeClosed,
 				}
 
-				if err := p.pulse.storage.UpdatePoolStats(poolStats); err != nil && p.pulse.config.DevMode {
-					p.pulse.logger.Printf("[pulse] failed to update pool stats: %v", err)
-				}
+				p.pulse.internalError("storage: pool stats", p.pulse.storage.UpdatePoolStats(poolStats))
 			}
 		}
 	})

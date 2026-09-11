@@ -24,12 +24,24 @@ import (
 // If [SLO.BurnRateAlerts] is nil, [DefaultBurnRateAlerts] is used: a fast-burn
 // page (1h window, 14.4× burn rate, critical) and a slow-burn ticket (6h
 // window, 6× burn rate, warning) as recommended by the Google SRE workbook.
+//
+// SLOs are evaluated from per-minute tallies of every request, taken before
+// Tracing.SampleRate is applied, so compliance is exact at any sample rate.
+// With the SQLite backend the tallies survive restarts.
 type SLO struct {
 	Name           string
 	Target         float64       // 0 < Target < 1, e.g. 0.999
 	Window         time.Duration // compliance window
 	Indicator      SLI
 	BurnRateAlerts []BurnRateAlert // nil → DefaultBurnRateAlerts()
+}
+
+// burnRateAlerts returns s.BurnRateAlerts, or DefaultBurnRateAlerts when nil.
+func (s SLO) burnRateAlerts() []BurnRateAlert {
+	if s.BurnRateAlerts == nil {
+		return DefaultBurnRateAlerts()
+	}
+	return s.BurnRateAlerts
 }
 
 // SLI is the per-event "good?" verdict an SLO uses to compute compliance.
@@ -102,7 +114,9 @@ func (s SLILatency) classify(m RequestMetric) (int64, int64) {
 
 // BurnRateAlert is a single burn-rate alert rule attached to an SLO. It
 // fires when the observed error rate over Window divided by the SLO's
-// target error rate (= 1 - SLO.Target) exceeds BurnRateMultiple.
+// target error rate (= 1 - SLO.Target) exceeds BurnRateMultiple, and the
+// same holds over ShortWindow. The short window makes the alert resolve
+// soon after the burn stops instead of lingering for the whole long window.
 //
 // Picking multiples: Google's SRE workbook expresses these as percent-of-
 // budget burned in a window. 2% of monthly budget burned in 1h ≈ 14.4× burn
@@ -112,15 +126,40 @@ type BurnRateAlert struct {
 	Window           time.Duration // e.g. 1 * time.Hour
 	BurnRateMultiple float64       // e.g. 14.4
 	Severity         string        // "critical" | "warning" | "info"
+
+	// ShortWindow is the confirmation window of multiwindow alerting.
+	// Zero means Window/12, as the SRE workbook recommends.
+	ShortWindow time.Duration
+
+	// MinEvents is the fewest events Window must hold before the alert may
+	// fire, so a handful of requests right after a deploy or restart can't
+	// page. Zero means 20; set 1 to fire on any traffic.
+	MinEvents int
 }
 
-// DefaultBurnRateAlerts returns the multi-window burn-rate alert set
-// recommended by the Google SRE workbook: a fast-burn page (1h, 14.4×) and
-// a slow-burn ticket (6h, 6×).
+const defaultBurnRateMinEvents = 20
+
+func (ba BurnRateAlert) shortWindow() time.Duration {
+	if ba.ShortWindow > 0 {
+		return ba.ShortWindow
+	}
+	return ba.Window / 12
+}
+
+func (ba BurnRateAlert) minEvents() int64 {
+	if ba.MinEvents > 0 {
+		return int64(ba.MinEvents)
+	}
+	return defaultBurnRateMinEvents
+}
+
+// DefaultBurnRateAlerts returns the multiwindow burn-rate alert set
+// recommended by the Google SRE workbook: a fast-burn page (1h confirmed
+// over 5m, 14.4×) and a slow-burn ticket (6h confirmed over 30m, 6×).
 func DefaultBurnRateAlerts() []BurnRateAlert {
 	return []BurnRateAlert{
-		{Name: "fast-burn", Window: 1 * time.Hour, BurnRateMultiple: 14.4, Severity: "critical"},
-		{Name: "slow-burn", Window: 6 * time.Hour, BurnRateMultiple: 6.0, Severity: "warning"},
+		{Name: "fast-burn", Window: 1 * time.Hour, ShortWindow: 5 * time.Minute, BurnRateMultiple: 14.4, Severity: "critical"},
+		{Name: "slow-burn", Window: 6 * time.Hour, ShortWindow: 30 * time.Minute, BurnRateMultiple: 6.0, Severity: "warning"},
 	}
 }
 
@@ -139,6 +178,11 @@ type SLOStatus struct {
 	BurnWindows        []BurnWindowStatus `json:"burn_windows"`
 	Status             string             `json:"status"` // ok | fast-burn | slow-burn | exhausted
 	Timestamp          time.Time          `json:"timestamp"`
+
+	// DataCoverage is the fraction of Window that Pulse holds data for. It
+	// stays below 1 until Pulse has been collecting — in this process, or
+	// in history persisted by the SQLite backend — for a full window.
+	DataCoverage float64 `json:"data_coverage"`
 }
 
 // BurnWindowStatus is one row in [SLOStatus.BurnWindows] — the live state of
@@ -151,13 +195,22 @@ type BurnWindowStatus struct {
 	Threshold  float64 `json:"threshold"`
 	Severity   string  `json:"severity"`
 	Firing     bool    `json:"firing"`
+
+	ShortWindow   string  `json:"short_window"`
+	ShortBurnRate float64 `json:"short_burn_rate"`
+	Events        int64   `json:"events"`     // events in Window
+	MinEvents     int64   `json:"min_events"` // events required before firing
+	DataCoverage  float64 `json:"data_coverage"`
 }
 
-// sloEvaluator periodically evaluates configured SLOs against stored requests
-// and synthesizes burn-rate alerts through the existing alert pipeline.
+// sloEvaluator periodically evaluates configured SLOs against the request
+// rollups and synthesizes burn-rate alerts through the existing alert
+// pipeline.
 type sloEvaluator struct {
 	pulse *Pulse
 	slos  []SLO
+
+	evalMu sync.Mutex // serializes evaluate, so firing transitions can't race
 
 	mu     sync.RWMutex
 	status map[string]SLOStatus            // snapshot for /pulse/api/slos
@@ -171,13 +224,13 @@ type sloFiring struct {
 	burnRate float64
 }
 
+// newSLOEvaluator prepares an evaluator for slos: it backfills default
+// burn-rate alerts, starts counting their events, and restores alerts left
+// firing by a previous run. Call start to evaluate on a tick.
 func newSLOEvaluator(p *Pulse, slos []SLO) *sloEvaluator {
-	// Backfill defaults so every SLO has at least one burn-rate alert.
 	prepared := make([]SLO, 0, len(slos))
 	for _, s := range slos {
-		if s.BurnRateAlerts == nil {
-			s.BurnRateAlerts = DefaultBurnRateAlerts()
-		}
+		s.BurnRateAlerts = s.burnRateAlerts()
 		prepared = append(prepared, s)
 	}
 
@@ -187,15 +240,21 @@ func newSLOEvaluator(p *Pulse, slos []SLO) *sloEvaluator {
 		status: make(map[string]SLOStatus, len(prepared)),
 		firing: make(map[string]map[string]sloFiring, len(prepared)),
 	}
+	p.rollups.trackSLOs(prepared)
+	ev.restoreFiring()
+	return ev
+}
 
+// start evaluates on a tick until the Pulse context is canceled.
+func (ev *sloEvaluator) start() {
+	p := ev.pulse
 	interval := 30 * time.Second
 	if p.config.DevMode {
 		interval = 10 * time.Second
 	}
 
 	p.startBackground("slo-evaluator", func(ctx context.Context) {
-		// One immediate tick after a short warm-up — gives the request ring
-		// buffer something to chew on.
+		// One tick after a short warm-up, then on the interval.
 		warmup := 5 * time.Second
 		if p.config.DevMode {
 			warmup = 2 * time.Second
@@ -218,62 +277,64 @@ func newSLOEvaluator(p *Pulse, slos []SLO) *sloEvaluator {
 			}
 		}
 	})
-
-	return ev
 }
 
-// evaluate scans the request store for each SLO, computes compliance over
-// the SLO window and each burn-rate sub-window, and fires/resolves burn-rate
-// alerts as needed.
-func (ev *sloEvaluator) evaluate() {
-	now := time.Now()
-
-	// Determine the widest window we need to scan once, then re-filter
-	// per-SLO in memory. Avoids hitting storage N times per tick.
-	var widest time.Duration
-	for _, s := range ev.slos {
-		if s.Window > widest {
-			widest = s.Window
-		}
-		for _, ba := range s.BurnRateAlerts {
-			if ba.Window > widest {
-				widest = ba.Window
-			}
-		}
-	}
-	if widest == 0 {
-		return
-	}
-
-	tr := TimeRange{Start: now.Add(-widest), End: now.Add(time.Second)}
-	requests, err := ev.pulse.storage.GetRequests(RequestFilter{TimeRange: tr})
+// restoreFiring reloads open burn-rate alerts from storage, so after a
+// restart a still-burning SLO doesn't page again and a recovered one gets
+// its original alert resolved.
+func (ev *sloEvaluator) restoreFiring() {
+	open, err := ev.pulse.storage.GetAlerts(AlertFilter{State: AlertStateFiring})
 	if err != nil {
-		if ev.pulse.config.DevMode {
-			ev.pulse.logger.Printf("[pulse] slo: failed to load requests: %v", err)
-		}
 		return
 	}
-
+	newest := make(map[string]AlertRecord, len(open))
+	for _, a := range open { // newest first
+		if _, seen := newest[a.RuleName]; !seen {
+			newest[a.RuleName] = a
+		}
+	}
 	for _, slo := range ev.slos {
-		ev.evaluateSLO(slo, requests, now)
+		for _, ba := range slo.BurnRateAlerts {
+			a, ok := newest[sloRuleName(slo, ba)]
+			if !ok {
+				continue
+			}
+			if ev.firing[slo.Name] == nil {
+				ev.firing[slo.Name] = make(map[string]sloFiring)
+			}
+			ev.firing[slo.Name][ba.Name] = sloFiring{id: a.ID, firedAt: a.FiredAt, burnRate: a.Value}
+		}
+	}
+}
+
+func sloRuleName(slo SLO, ba BurnRateAlert) string {
+	return "slo:" + slo.Name + ":" + ba.Name
+}
+
+// evaluate computes every SLO's compliance and burn rates as of now, updates
+// the dashboard snapshot, and fires/resolves burn-rate alerts.
+func (ev *sloEvaluator) evaluate() {
+	ev.evalMu.Lock()
+	defer ev.evalMu.Unlock()
+	now := ev.pulse.now()
+	for _, slo := range ev.slos {
+		ev.evaluateSLO(slo, now)
 	}
 }
 
 // evaluateSLO computes the long-window compliance + all burn-rate sub-windows
 // for a single SLO, updates the dashboard snapshot, and fires/resolves
 // burn-rate alerts.
-func (ev *sloEvaluator) evaluateSLO(slo SLO, requests []RequestMetric, now time.Time) {
-	if slo.Target <= 0 || slo.Target >= 1 || slo.Window <= 0 {
+func (ev *sloEvaluator) evaluateSLO(slo SLO, now time.Time) {
+	if slo.Indicator == nil || slo.Target <= 0 || slo.Target >= 1 || slo.Window <= 0 {
 		return
 	}
+	r := ev.pulse.rollups
 	budgetErrorRate := 1 - slo.Target
 
 	// Long window compliance.
-	good, total := countWindow(slo.Indicator, requests, now, slo.Window)
-	compliance := 1.0
-	if total > 0 {
-		compliance = float64(good) / float64(total)
-	}
+	good, total := r.sloCounts(slo.Name, now.Add(-slo.Window), now)
+	compliance := complianceOf(good, total)
 	consumed := budgetConsumed(compliance, slo.Target)
 
 	// Burn-rate sub-windows.
@@ -281,25 +342,29 @@ func (ev *sloEvaluator) evaluateSLO(slo SLO, requests []RequestMetric, now time.
 	worstSeverity := 0
 	windows := make([]BurnWindowStatus, 0, len(slo.BurnRateAlerts))
 	for _, ba := range slo.BurnRateAlerts {
-		gw, tw := countWindow(slo.Indicator, requests, now, ba.Window)
-		var burnRate float64
-		var wCompliance float64 = 1.0
-		if tw > 0 {
-			wCompliance = float64(gw) / float64(tw)
-			observedErrRate := 1 - wCompliance
-			if budgetErrorRate > 0 {
-				burnRate = observedErrRate / budgetErrorRate
-			}
-		}
-		firing := burnRate > ba.BurnRateMultiple && tw > 0
+		gw, tw := r.sloCounts(slo.Name, now.Add(-ba.Window), now)
+		gs, ts := r.sloCounts(slo.Name, now.Add(-ba.shortWindow()), now)
+		wCompliance := complianceOf(gw, tw)
+		burnRate := burnRateOf(gw, tw, budgetErrorRate)
+		shortBurn := burnRateOf(gs, ts, budgetErrorRate)
+
+		firing := tw >= ba.minEvents() &&
+			burnRate > ba.BurnRateMultiple &&
+			shortBurn > ba.BurnRateMultiple
+
 		windows = append(windows, BurnWindowStatus{
-			Name:       ba.Name,
-			Window:     ba.Window.String(),
-			Compliance: wCompliance,
-			BurnRate:   burnRate,
-			Threshold:  ba.BurnRateMultiple,
-			Severity:   ba.Severity,
-			Firing:     firing,
+			Name:          ba.Name,
+			Window:        ba.Window.String(),
+			Compliance:    wCompliance,
+			BurnRate:      burnRate,
+			Threshold:     ba.BurnRateMultiple,
+			Severity:      ba.Severity,
+			Firing:        firing,
+			ShortWindow:   ba.shortWindow().String(),
+			ShortBurnRate: shortBurn,
+			Events:        tw,
+			MinEvents:     ba.minEvents(),
+			DataCoverage:  r.coverage(now, ba.Window),
 		})
 		if firing {
 			rank := severityRank(ba.Severity)
@@ -328,6 +393,7 @@ func (ev *sloEvaluator) evaluateSLO(slo SLO, requests []RequestMetric, now time.
 		BurnWindows:        windows,
 		Status:             worstStatus,
 		Timestamp:          now,
+		DataCoverage:       r.coverage(now, slo.Window),
 	}
 
 	ev.mu.Lock()
@@ -340,7 +406,7 @@ func (ev *sloEvaluator) evaluateSLO(slo SLO, requests []RequestMetric, now time.
 func (ev *sloEvaluator) reconcileAlert(
 	slo SLO, ba BurnRateAlert, burnRate, compliance float64, firing bool, now time.Time,
 ) {
-	ruleName := "slo:" + slo.Name + ":" + ba.Name
+	ruleName := sloRuleName(slo, ba)
 
 	ev.mu.Lock()
 	if ev.firing[slo.Name] == nil {
@@ -374,13 +440,15 @@ func (ev *sloEvaluator) reconcileAlert(
 		ev.mu.Unlock()
 
 	case !firing && wasFiring:
-		// Transition firing → resolved.
+		// Transition firing → resolved. Close the open record in place: same
+		// ID, original firing time and burn rate, so the incident reads as
+		// one record.
 		resolved := now
 		alert := AlertRecord{
-			ID:        GenerateTraceID(),
+			ID:        prev.id,
 			RuleName:  ruleName,
 			Metric:    "burn_rate",
-			Value:     burnRate,
+			Value:     prev.burnRate,
 			Threshold: ba.BurnRateMultiple,
 			Operator:  ">",
 			Severity:  ba.Severity,
@@ -392,10 +460,6 @@ func (ev *sloEvaluator) reconcileAlert(
 			FiredAt:    prev.firedAt,
 			ResolvedAt: &resolved,
 		}
-		// Close the open record in place: same ID, original firing time and
-		// burn rate, so the incident reads as one record.
-		alert.ID = prev.id
-		alert.Value = prev.burnRate
 		ev.storeAndNotify(alert)
 		ev.mu.Lock()
 		delete(ev.firing[slo.Name], ba.Name)
@@ -406,12 +470,10 @@ func (ev *sloEvaluator) reconcileAlert(
 // storeAndNotify persists an alert, broadcasts it over the WebSocket, and
 // dispatches notifications through the existing AlertEngine channels.
 func (ev *sloEvaluator) storeAndNotify(alert AlertRecord) {
-	if err := ev.pulse.storage.StoreAlert(alert); err != nil && ev.pulse.config.DevMode {
-		ev.pulse.logger.Printf("[pulse] slo: failed to store alert: %v", err)
-	}
+	ev.pulse.internalError("storage: alerts", ev.pulse.storage.StoreAlert(alert))
 	ev.pulse.BroadcastAlert(alert)
 	if ev.pulse.alertEngine != nil {
-		go ev.pulse.alertEngine.sendNotifications(alert)
+		ev.pulse.alertEngine.notify(alert)
 	}
 	if ev.pulse.config.DevMode {
 		ev.pulse.logger.Printf("[pulse] slo: %s — %s", alert.State, alert.Message)
@@ -434,19 +496,20 @@ func (ev *sloEvaluator) Snapshot() []SLOStatus {
 
 // --- helpers ---
 
-// countWindow walks the request slice and accumulates good/total per the SLI
-// for events within the last window from now.
-func countWindow(sli SLI, requests []RequestMetric, now time.Time, window time.Duration) (good, total int64) {
-	cutoff := now.Add(-window)
-	for _, r := range requests {
-		if r.Timestamp.Before(cutoff) {
-			continue
-		}
-		g, t := sli.classify(r)
-		good += g
-		total += t
+// complianceOf is good/total, or 1 when there were no events.
+func complianceOf(good, total int64) float64 {
+	if total == 0 {
+		return 1
 	}
-	return good, total
+	return float64(good) / float64(total)
+}
+
+// burnRateOf is the observed error rate divided by the error budget rate.
+func burnRateOf(good, total int64, budgetErrorRate float64) float64 {
+	if total == 0 || budgetErrorRate <= 0 {
+		return 0
+	}
+	return (1 - complianceOf(good, total)) / budgetErrorRate
 }
 
 // budgetConsumed returns the fraction of the SLO error budget that has

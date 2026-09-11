@@ -59,12 +59,14 @@ func (agg *Aggregator) run() {
 
 	// 1. Compute per-route stats with trend detection
 	routeStats := agg.computeRouteStatsWithTrend(tr)
+	agg.applyRollupRouteCounts(tr, routeStats)
 
 	// 2. Compute time-series rollups
 	throughput, errors, latency := agg.computeTimeSeries(tr)
 
 	// 3. Compute overview
 	overview := agg.computeOverview(tr, routeStats, throughput, errors)
+	agg.applyRollupTotals(tr, overview)
 
 	// Swap in new data
 	agg.mu.Lock()
@@ -77,6 +79,61 @@ func (agg *Aggregator) run() {
 
 	// Broadcast overview to connected WebSocket clients
 	agg.pulse.BroadcastOverview(overview)
+}
+
+// --- Exact counts from rollups ---
+//
+// Storage holds a sample of requests (errors and slow requests always,
+// successes at Tracing.SampleRate) and, on the Memory backend, only as many
+// as the ring buffer fits. The rollups count every request, so request
+// counts, error counts, error rates and RPM are taken from them. Latency
+// percentiles still come from the stored sample. Routes the rollups never
+// saw — and every figure when they hold nothing for the window — keep their
+// stored values.
+
+// applyRollupRouteCounts corrects per-route counts in place and re-sorts the
+// routes by request count.
+func (agg *Aggregator) applyRollupRouteCounts(tr TimeRange, stats []RouteStats) {
+	perRoute := agg.pulse.rollups.routeTotals(tr.Start, tr.End)
+	if len(perRoute) == 0 {
+		return
+	}
+	minutes := tr.End.Sub(tr.Start).Minutes()
+	for i := range stats {
+		c, ok := perRoute[rollupRouteKey{method: stats[i].Method, route: stats[i].Path}]
+		if !ok || c.total == 0 {
+			continue
+		}
+		stats[i].RequestCount, stats[i].ErrorCount, stats[i].ErrorRate, stats[i].RPM = rollupRates(c, minutes)
+	}
+	sort.SliceStable(stats, func(i, j int) bool { return stats[i].RequestCount > stats[j].RequestCount })
+}
+
+// applyRollupTotals corrects the overview's request totals and error rate.
+func (agg *Aggregator) applyRollupTotals(tr TimeRange, overview *Overview) {
+	if overview == nil {
+		return
+	}
+	c := agg.pulse.rollups.summary(tr.Start, tr.End).counts
+	if c.total == 0 {
+		return
+	}
+	overview.TotalRequests, overview.TotalErrors, overview.ErrorRate, overview.RPM =
+		rollupRates(c, tr.End.Sub(tr.Start).Minutes())
+}
+
+// rollupRates returns request count, error count (any status ≥ 400, matching
+// computeRouteStats), error rate in percent, and requests per minute.
+func rollupRates(c routeCounts, minutes float64) (requests, errors int64, errorRate, rpm float64) {
+	requests = c.total
+	errors = c.status4xx + c.status5xx
+	if requests > 0 {
+		errorRate = float64(errors) / float64(requests) * 100
+	}
+	if minutes > 0 {
+		rpm = float64(requests) / minutes
+	}
+	return requests, errors, errorRate, rpm
 }
 
 // --- Cached Getters (used by API endpoints) ---

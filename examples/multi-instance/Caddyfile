@@ -1,0 +1,11 @@
+:80 {
+	# Pulse dashboard, API and WebSocket: pin each browser to one replica,
+	# since every replica keeps its own data.
+	@pulse path /pulse /pulse/*
+	reverse_proxy @pulse api1:8080 api2:8080 {
+		lb_policy cookie
+	}
+
+	# Application traffic: spread across replicas.
+	reverse_proxy api1:8080 api2:8080
+}

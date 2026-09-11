@@ -95,14 +95,11 @@ func newErrorMiddleware(p *Pulse) gin.HandlerFunc {
 					errMsg,
 					ErrorTypePanic,
 					stack,
-					captureRequestContext(c, body),
+					captureRequestContext(c, body, p.redactor),
 					traceID,
 				)
 
-				if err := p.storage.StoreError(record); err != nil && p.config.DevMode {
-					p.logger.Printf("[pulse] failed to store panic error: %v", err)
-				}
-				p.BroadcastError(record)
+				p.recordError(record)
 
 				// Abort with 500
 				c.AbortWithStatus(http.StatusInternalServerError)
@@ -137,16 +134,11 @@ func newErrorMiddleware(p *Pulse) gin.HandlerFunc {
 					errMsg,
 					errType,
 					stack,
-					captureRequestContext(c, body),
+					captureRequestContext(c, body, p.redactor),
 					traceID,
 				)
 
-				go func(r ErrorRecord) {
-					if err := p.storage.StoreError(r); err != nil && p.config.DevMode {
-						p.logger.Printf("[pulse] failed to store error: %v", err)
-					}
-					p.BroadcastError(r)
-				}(record)
+				p.recordError(record)
 			}
 		} else if statusCode >= 500 {
 			// No explicit Gin errors, but 5xx status code — record as internal error
@@ -164,18 +156,22 @@ func newErrorMiddleware(p *Pulse) gin.HandlerFunc {
 				errMsg,
 				errType,
 				stack,
-				captureRequestContext(c, body),
+				captureRequestContext(c, body, p.redactor),
 				traceID,
 			)
 
-			go func(r ErrorRecord) {
-				if err := p.storage.StoreError(r); err != nil && p.config.DevMode {
-					p.logger.Printf("[pulse] failed to store error: %v", err)
-				}
-				p.BroadcastError(r)
-			}(record)
+			p.recordError(record)
 		}
 	}
+}
+
+// recordError applies final redaction to an error record, stores it, and
+// broadcasts it to dashboard clients. Both storage backends store without
+// blocking, so this is safe to call on the request path.
+func (p *Pulse) recordError(r ErrorRecord) {
+	p.redactor.finishRecord(&r)
+	p.internalError("storage: errors", p.storage.StoreError(r))
+	p.BroadcastError(r)
 }
 
 // buildErrorRecord constructs a complete ErrorRecord with fingerprint and timestamps.
@@ -305,24 +301,14 @@ func shouldSkipFrame(fn string) bool {
 	return false
 }
 
-// captureRequestContext builds a RequestContext from the Gin context with
-// sensitive headers, query parameters and body fields redacted.
-func captureRequestContext(c *gin.Context, body capturedBody) *RequestContext {
-	headers := make(map[string]string)
-	for key, values := range c.Request.Header {
-		lowerKey := strings.ToLower(key)
-		if sensitiveHeaders[lowerKey] {
-			headers[key] = redactedPlaceholder
-		} else if len(values) > 0 {
-			headers[key] = values[0]
-		}
-	}
-
+// captureRequestContext builds a RequestContext from the Gin context, with
+// secrets in the headers, path, query string and body redacted by r.
+func captureRequestContext(c *gin.Context, body capturedBody, r *redactor) *RequestContext {
 	reqCtx := &RequestContext{
 		Method:      c.Request.Method,
-		Path:        c.Request.URL.Path,
-		Query:       redactQuery(c.Request.URL.RawQuery),
-		Headers:     headers,
+		Path:        r.scrubValue(c.Request.URL.Path),
+		Query:       r.query(c.Request.URL.RawQuery),
+		Headers:     r.headerMap(c.Request.Header),
 		ClientIP:    c.ClientIP(),
 		UserAgent:   c.Request.UserAgent(),
 		ContentType: c.ContentType(),
@@ -332,7 +318,7 @@ func captureRequestContext(c *gin.Context, body capturedBody) *RequestContext {
 	case body.omitted:
 		reqCtx.Body = omittedBodyMarker(body.size, reqCtx.ContentType)
 	case len(body.data) > 0:
-		reqCtx.Body = string(redactBody(reqCtx.ContentType, body.data))
+		reqCtx.Body = string(r.body(reqCtx.ContentType, body.data))
 		reqCtx.BodyTruncated = int64(len(body.data)) < body.size
 	}
 

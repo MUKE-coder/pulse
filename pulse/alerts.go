@@ -5,12 +5,16 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/smtp"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -23,6 +27,35 @@ type AlertEngine struct {
 
 	mu         sync.RWMutex
 	ruleStates map[string]*ruleState // keyed by rule name
+
+	// lastDropped is the storage's dropped-write total at the previous
+	// storage_dropped_writes evaluation, so the metric reports new drops.
+	lastDropped int64
+
+	// notifyQ feeds the notification workers. It is bounded, so a slow or
+	// unreachable notification channel can't pile up goroutines; nil for
+	// engines not built by newAlertEngine.
+	notifyQ chan AlertRecord
+}
+
+const (
+	notificationQueueSize = 256
+	notificationWorkers   = 2
+)
+
+// notify queues an alert for delivery to the notification channels. When the
+// queue is full the notification is dropped and counted as an internal error.
+func (ae *AlertEngine) notify(alert AlertRecord) {
+	if ae.notifyQ == nil {
+		go ae.sendNotifications(alert)
+		return
+	}
+	select {
+	case ae.notifyQ <- alert:
+	default:
+		ae.pulse.internalError("notifications",
+			fmt.Errorf("notification queue full; dropped the %s notification for %q", alert.State, alert.RuleName))
+	}
 }
 
 // ruleState tracks the evaluation state of a single alert rule.
@@ -77,6 +110,24 @@ var defaultAlertRules = []AlertRule{
 		Duration:  2 * time.Minute,
 		Severity:  "critical",
 	},
+	{
+		// Buffer capacity, not RetentionHours, is limiting history.
+		Name:      "storage_retention_limited",
+		Metric:    "retention_coverage",
+		Operator:  "<",
+		Threshold: 0.5, // holding less than half the configured retention
+		Duration:  15 * time.Minute,
+		Severity:  "warning",
+	},
+	{
+		// The SQLite write queue overflowed since the last evaluation.
+		Name:      "storage_writes_dropped",
+		Metric:    "storage_dropped_writes",
+		Operator:  ">",
+		Threshold: 0,
+		Duration:  0,
+		Severity:  "warning",
+	},
 }
 
 // newAlertEngine creates and starts the alert evaluation engine.
@@ -114,6 +165,22 @@ func newAlertEngine(p *Pulse) *AlertEngine {
 		interval = 10 * time.Second
 	}
 
+	ae.restoreFiring()
+
+	ae.notifyQ = make(chan AlertRecord, notificationQueueSize)
+	for i := 0; i < notificationWorkers; i++ {
+		p.startBackground("alert-notifier", func(ctx context.Context) {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case alert := <-ae.notifyQ:
+					ae.sendNotifications(alert)
+				}
+			}
+		})
+	}
+
 	p.startBackground("alert-engine", func(ctx context.Context) {
 		// Initial delay to let metrics accumulate
 		select {
@@ -138,6 +205,26 @@ func newAlertEngine(p *Pulse) *AlertEngine {
 	})
 
 	return ae
+}
+
+// restoreFiring reloads open alerts from storage, so after a restart a rule
+// that is still breaching doesn't fire a duplicate, and one that has
+// recovered resolves its original alert.
+func (ae *AlertEngine) restoreFiring() {
+	open, err := ae.pulse.storage.GetAlerts(AlertFilter{State: AlertStateFiring})
+	if err != nil {
+		return
+	}
+	for _, a := range open { // newest first
+		rs, ok := ae.ruleStates[a.RuleName]
+		if !ok || rs.state == AlertStateFiring {
+			continue
+		}
+		rs.state = AlertStateFiring
+		rs.alertID = a.ID
+		rs.lastFired = a.FiredAt
+		rs.firedValue = a.Value
+	}
 }
 
 // evaluate runs all alert rules against current metrics.
@@ -250,6 +337,19 @@ func (ae *AlertEngine) getMetricValue(rule AlertRule) (float64, bool) {
 		}
 		return ae.pulse.runtimeSampler.GoroutineGrowthRate(), true
 
+	case "retention_coverage":
+		coverage, _, ok := retentionCoverage(ae.pulse, time.Now())
+		return coverage, ok
+
+	case "storage_dropped_writes":
+		total, ok := droppedWrites(ae.pulse)
+		if !ok {
+			return 0, false
+		}
+		fresh := total - ae.lastDropped
+		ae.lastDropped = total
+		return float64(fresh), true
+
 	case "health_status":
 		if ae.pulse.healthRunner == nil {
 			return 1, true // healthy by default
@@ -318,15 +418,19 @@ func (ae *AlertEngine) fireAlert(rs *ruleState, value float64) {
 		FiredAt:   time.Now(),
 	}
 
-	if err := ae.pulse.storage.StoreAlert(alert); err != nil && ae.pulse.config.DevMode {
-		ae.pulse.logger.Printf("[pulse] failed to store alert: %v", err)
+	if rs.rule.Metric == "retention_coverage" {
+		if detail := retentionDetail(ae.pulse); detail != "" {
+			alert.Message += " — " + detail
+		}
 	}
+
+	ae.pulse.internalError("storage: alerts", ae.pulse.storage.StoreAlert(alert))
 
 	// Broadcast to WebSocket clients
 	ae.pulse.BroadcastAlert(alert)
 
 	// Send notifications asynchronously
-	go ae.sendNotifications(alert)
+	ae.notify(alert)
 
 	if ae.pulse.config.DevMode {
 		ae.pulse.logger.Printf("[pulse] alert fired: %s — %s", rs.rule.Name, alert.Message)
@@ -356,14 +460,12 @@ func (ae *AlertEngine) resolveAlert(rs *ruleState) {
 		ResolvedAt: &now,
 	}
 
-	if err := ae.pulse.storage.StoreAlert(alert); err != nil && ae.pulse.config.DevMode {
-		ae.pulse.logger.Printf("[pulse] failed to store resolved alert: %v", err)
-	}
+	ae.pulse.internalError("storage: alerts", ae.pulse.storage.StoreAlert(alert))
 	rs.alertID = ""
 
 	ae.pulse.BroadcastAlert(alert)
 
-	go ae.sendNotifications(alert)
+	ae.notify(alert)
 
 	if ae.pulse.config.DevMode {
 		ae.pulse.logger.Printf("[pulse] alert resolved: %s", rs.rule.Name)
@@ -382,6 +484,10 @@ func formatAlertMessage(rule AlertRule, value float64) string {
 		valueStr = fmt.Sprintf("%.0fMB", value)
 	case "goroutine_growth":
 		valueStr = fmt.Sprintf("%.0f/hr", value)
+	case "retention_coverage":
+		valueStr = fmt.Sprintf("%.0f%%", value*100)
+	case "storage_dropped_writes":
+		valueStr = fmt.Sprintf("%.0f dropped", value)
 	case "health_status":
 		if value == 0 {
 			valueStr = "unhealthy"
@@ -404,6 +510,8 @@ func formatAlertMessage(rule AlertRule, value float64) string {
 		thresholdStr = fmt.Sprintf("%.0fMB", rule.Threshold)
 	case "goroutine_growth":
 		thresholdStr = fmt.Sprintf("%.0f/hr", rule.Threshold)
+	case "retention_coverage":
+		thresholdStr = fmt.Sprintf("%.0f%%", rule.Threshold*100)
 	default:
 		thresholdStr = fmt.Sprintf("%.2f", rule.Threshold)
 	}
@@ -511,11 +619,85 @@ func (ae *AlertEngine) sendEmail(cfg *EmailConfig, alert AlertRecord) {
 		auth = smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
 	}
 
-	if err := smtp.SendMail(addr, auth, cfg.From, cfg.To, []byte(msg)); err != nil {
-		if ae.pulse.config.DevMode {
-			ae.pulse.logger.Printf("[pulse] email notification failed: %v", err)
+	if err := sendMail(addr, auth, cfg.From, cfg.To, []byte(msg)); err != nil {
+		ae.pulse.internalError("notifications", fmt.Errorf("email via %s: %w", addr, err))
+	}
+}
+
+// smtpTimeout bounds a whole SMTP conversation. net/smtp has no timeouts of
+// its own, so an unresponsive mail server would otherwise hang the sender
+// indefinitely.
+var smtpTimeout = 15 * time.Second
+
+// sendMail is smtp.SendMail — STARTTLS when offered, AUTH when configured —
+// with a dial timeout and a deadline on the connection.
+func sendMail(addr string, auth smtp.Auth, from string, to []string, msg []byte) error {
+	for _, line := range append([]string{from}, to...) {
+		if strings.ContainsAny(line, "\r\n") {
+			return errors.New("smtp: address contains CR or LF")
 		}
 	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return err
+	}
+	conn, err := net.DialTimeout("tcp", addr, smtpTimeout)
+	if err != nil {
+		return err
+	}
+	if err := conn.SetDeadline(time.Now().Add(smtpTimeout)); err != nil {
+		conn.Close()
+		return err
+	}
+	c, err := smtp.NewClient(conn, host)
+	if err != nil {
+		conn.Close()
+		return err
+	}
+	defer c.Close()
+
+	if ok, _ := c.Extension("STARTTLS"); ok {
+		if err := c.StartTLS(&tls.Config{ServerName: host}); err != nil {
+			return err
+		}
+	}
+	if auth != nil {
+		if ok, _ := c.Extension("AUTH"); !ok {
+			return errors.New("smtp: server doesn't support AUTH")
+		}
+		if err := c.Auth(auth); err != nil {
+			return err
+		}
+	}
+	if err := c.Mail(from); err != nil {
+		return err
+	}
+	for _, rcpt := range to {
+		if err := c.Rcpt(rcpt); err != nil {
+			return err
+		}
+	}
+	w, err := c.Data()
+	if err != nil {
+		return err
+	}
+	if _, err := w.Write(msg); err != nil {
+		return err
+	}
+	if err := w.Close(); err != nil {
+		return err
+	}
+	return c.Quit()
+}
+
+// notificationError describes a failed webhook call without its URL: chat
+// webhook URLs embed their credentials.
+func notificationError(service string, err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return fmt.Errorf("%s webhook: %v", service, ue.Err)
+	}
+	return fmt.Errorf("%s webhook: %v", service, err)
 }
 
 // sendWebhook sends a POST to a generic webhook URL with optional HMAC signature.
@@ -575,9 +757,11 @@ func (ae *AlertEngine) sendWebhook(cfg WebhookConfig, alert AlertRecord) {
 		}
 	}
 
-	if ae.pulse.config.DevMode {
-		ae.pulse.logger.Printf("[pulse] webhook notification failed after retries: %s", cfg.URL)
+	host := "webhook"
+	if u, err := url.Parse(cfg.URL); err == nil && u.Host != "" {
+		host = u.Host
 	}
+	ae.pulse.internalError("notifications", fmt.Errorf("webhook to %s failed after 3 attempts", host))
 }
 
 // postJSON sends a JSON POST request (for Slack/Discord webhooks).
@@ -590,12 +774,13 @@ func (ae *AlertEngine) postJSON(url string, payload interface{}, service string)
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Post(url, "application/json", bytes.NewReader(data))
 	if err != nil {
-		if ae.pulse.config.DevMode {
-			ae.pulse.logger.Printf("[pulse] %s notification failed: %v", service, err)
-		}
+		ae.pulse.internalError("notifications", notificationError(service, err))
 		return
 	}
 	resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		ae.pulse.internalError("notifications", fmt.Errorf("%s webhook returned HTTP %d", service, resp.StatusCode))
+	}
 }
 
 // --- Helpers ---

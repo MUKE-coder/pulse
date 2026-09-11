@@ -164,6 +164,13 @@ func registerAPIRoutes(router *gin.Engine, p *Pulse) {
 	// Test runs (k6 / load-test overlay)
 	protected.GET("/test-runs", testRunsListHandler(p))
 	protected.POST("/test-runs", testRunsCreateHandler(p))
+	protected.GET("/test-runs/:id/compare", testRunCompareHandler(p))
+
+	// Lifecycle (process start/stop events, data coverage)
+	protected.GET("/lifecycle", lifecycleHandler(p))
+
+	// Storage capacity (buffer fill, effective retention, dropped writes)
+	protected.GET("/storage", storageHandler(p))
 
 	// Profiling / flame graph (off by default; double-gated, see profile.go)
 	protected.GET("/profile/flamegraph", profileFlameGraphHandler(p))
@@ -789,6 +796,7 @@ func dataResetHandler(p *Pulse) gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+		p.rollups.reset(p.now())
 		c.JSON(http.StatusOK, gin.H{"status": "data reset complete"})
 	}
 }

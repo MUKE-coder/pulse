@@ -124,8 +124,14 @@ func newTracingMiddleware(p *Pulse) gin.HandlerFunc {
 		// Get the route pattern (e.g., "/users/:id") instead of actual path
 		routePattern := c.FullPath()
 		if routePattern == "" {
-			routePattern = requestPath
+			// Unmatched: the raw path is all there is, and it may carry a
+			// token (/reset/eyJ…), so scrub it.
+			routePattern = p.redactor.scrubValue(requestPath)
 		}
+
+		// Count every request before sampling, so totals, error rates and
+		// SLO compliance stay exact at any sample rate.
+		p.rollups.observe(c.Request.Method, c.FullPath(), routePattern, statusCode, latency, start)
 
 		// The request is done, so its N+1 tallies are final. Record them
 		// whether or not this request is sampled below.
@@ -145,7 +151,7 @@ func newTracingMiddleware(p *Pulse) gin.HandlerFunc {
 		// Collect error message from gin errors
 		var errMsg string
 		if len(c.Errors) > 0 {
-			errMsg = c.Errors.Last().Error()
+			errMsg = p.redactor.scrubValue(c.Errors.Last().Error())
 		}
 
 		// Build metric
@@ -163,13 +169,10 @@ func newTracingMiddleware(p *Pulse) gin.HandlerFunc {
 			Timestamp:    start,
 		}
 
-		// Store asynchronously to avoid blocking the response
-		go func() {
-			if err := p.storage.StoreRequest(metric); err != nil && p.config.DevMode {
-				p.logger.Printf("[pulse] failed to store request metric: %v", err)
-			}
-			p.BroadcastRequest(metric)
-		}()
+		// Both backends store without blocking (a ring-buffer push, or a
+		// queue append for SQLite), so no goroutine per request is needed.
+		p.internalError("storage: requests", p.storage.StoreRequest(metric))
+		p.BroadcastRequest(metric)
 	}
 }
 
