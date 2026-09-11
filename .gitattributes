@@ -1,0 +1,6 @@
+# The dashboard build copies ui/dashboard/index.html into ui/dist, and CI
+# checks that the committed ui/dist matches a fresh build. Keep the
+# dashboard source and build output LF on every platform, so a build on
+# Windows produces the same bytes as CI's Linux build.
+ui/dashboard/** text=auto eol=lf
+ui/dist/** text=auto eol=lf
