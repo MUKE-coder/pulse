@@ -12,7 +12,7 @@ var _ rollupStore = (*SQLiteStorage)(nil)
 
 // saveRollups upserts the given minutes in one transaction. Minutes are
 // saved whole, so saving the same minute again simply replaces it.
-func (s *SQLiteStorage) saveRollups(minutes []minuteSnapshot) error {
+func (s *sqlStore) saveRollups(minutes []minuteSnapshot) error {
 	if len(minutes) == 0 {
 		return nil
 	}
@@ -26,16 +26,20 @@ func (s *SQLiteStorage) saveRollups(minutes []minuteSnapshot) error {
 	}
 	defer tx.Rollback() // no-op once committed
 
-	routeStmt, err := tx.Prepare(`INSERT OR REPLACE INTO request_rollups
-		(minute, method, route, total, status_4xx, status_5xx, latency_ns) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+	routeStmt, err := tx.Prepare(s.d.sql(`INSERT INTO request_rollups
+		(minute, method, route, total, status_4xx, status_5xx, latency_ns) VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (minute, method, route) DO UPDATE SET total = excluded.total,
+		    status_4xx = excluded.status_4xx, status_5xx = excluded.status_5xx, latency_ns = excluded.latency_ns`))
 	if err != nil {
 		return err
 	}
-	histStmt, err := tx.Prepare(`INSERT OR REPLACE INTO latency_rollups (minute, hist) VALUES (?, ?)`)
+	histStmt, err := tx.Prepare(s.d.sql(`INSERT INTO latency_rollups (minute, hist) VALUES (?, ?)
+		ON CONFLICT (minute) DO UPDATE SET hist = excluded.hist`))
 	if err != nil {
 		return err
 	}
-	sloStmt, err := tx.Prepare(`INSERT OR REPLACE INTO slo_rollups (minute, slo, good, total) VALUES (?, ?, ?, ?)`)
+	sloStmt, err := tx.Prepare(s.d.sql(`INSERT INTO slo_rollups (minute, slo, good, total) VALUES (?, ?, ?, ?)
+		ON CONFLICT (minute, slo) DO UPDATE SET good = excluded.good, total = excluded.total`))
 	if err != nil {
 		return err
 	}
@@ -62,7 +66,7 @@ func (s *SQLiteStorage) saveRollups(minutes []minuteSnapshot) error {
 }
 
 // loadRollups returns every persisted minute at or after sinceMinute.
-func (s *SQLiteStorage) loadRollups(sinceMinute int64) ([]minuteSnapshot, error) {
+func (s *sqlStore) loadRollups(sinceMinute int64) ([]minuteSnapshot, error) {
 	s.sync()
 	byMinute := make(map[int64]*minuteSnapshot)
 	get := func(m int64) *minuteSnapshot {
@@ -74,7 +78,7 @@ func (s *SQLiteStorage) loadRollups(sinceMinute int64) ([]minuteSnapshot, error)
 		return snap
 	}
 
-	rows, err := s.db.Query(`SELECT minute, method, route, total, status_4xx, status_5xx, latency_ns
+	rows, err := s.query(`SELECT minute, method, route, total, status_4xx, status_5xx, latency_ns
 		FROM request_rollups WHERE minute >= ?`, sinceMinute)
 	if err != nil {
 		return nil, err
@@ -102,7 +106,7 @@ func (s *SQLiteStorage) loadRollups(sinceMinute int64) ([]minuteSnapshot, error)
 		return nil, err
 	}
 
-	rows, err = s.db.Query(`SELECT minute, hist FROM latency_rollups WHERE minute >= ?`, sinceMinute)
+	rows, err = s.query(`SELECT minute, hist FROM latency_rollups WHERE minute >= ?`, sinceMinute)
 	if err != nil {
 		return nil, err
 	}
@@ -123,7 +127,7 @@ func (s *SQLiteStorage) loadRollups(sinceMinute int64) ([]minuteSnapshot, error)
 		return nil, err
 	}
 
-	rows, err = s.db.Query(`SELECT minute, slo, good, total FROM slo_rollups WHERE minute >= ?`, sinceMinute)
+	rows, err = s.query(`SELECT minute, slo, good, total FROM slo_rollups WHERE minute >= ?`, sinceMinute)
 	if err != nil {
 		return nil, err
 	}
@@ -154,16 +158,16 @@ func (s *SQLiteStorage) loadRollups(sinceMinute int64) ([]minuteSnapshot, error)
 
 // pruneRollups deletes per-route and latency rollups before detailBefore and
 // SLO rollups before sloBefore (Unix minutes).
-func (s *SQLiteStorage) pruneRollups(detailBefore, sloBefore int64) error {
+func (s *sqlStore) pruneRollups(detailBefore, sloBefore int64) error {
 	s.sync()
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	if _, err := s.db.Exec(`DELETE FROM request_rollups WHERE minute < ?`, detailBefore); err != nil {
+	if _, err := s.exec(`DELETE FROM request_rollups WHERE minute < ?`, detailBefore); err != nil {
 		return err
 	}
-	if _, err := s.db.Exec(`DELETE FROM latency_rollups WHERE minute < ?`, detailBefore); err != nil {
+	if _, err := s.exec(`DELETE FROM latency_rollups WHERE minute < ?`, detailBefore); err != nil {
 		return err
 	}
-	_, err := s.db.Exec(`DELETE FROM slo_rollups WHERE minute < ?`, sloBefore)
+	_, err := s.exec(`DELETE FROM slo_rollups WHERE minute < ?`, sloBefore)
 	return err
 }

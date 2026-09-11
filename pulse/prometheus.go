@@ -58,7 +58,7 @@ func buildPrometheusMetrics(p *Pulse) string {
 	fmt.Fprintf(&b, "# HELP pulse_build_info Pulse version, instance ID and storage backend\n")
 	fmt.Fprintf(&b, "# TYPE pulse_build_info gauge\n")
 	fmt.Fprintf(&b, "pulse_build_info{version=%q,instance_id=%q,storage=%q} 1\n\n",
-		Version, p.config.InstanceID, storageDriverName(p.config.Storage.Driver))
+		Version, p.config.InstanceID, p.storageName())
 
 	return b.String()
 }

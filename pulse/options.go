@@ -118,6 +118,36 @@ func WithSQLite(path string) Option {
 	}
 }
 
+// WithPostgres selects the PostgreSQL backend, which several instances of an
+// application can share, on the connection string dsn. The application must
+// import a PostgreSQL database/sql driver:
+//
+//	import _ "github.com/jackc/pgx/v5/stdlib"
+//
+// Pulse's tables are created in the "pulse" schema; see [WithPostgresSchema].
+func WithPostgres(dsn string) Option {
+	return func(c *Config) {
+		c.Storage.Driver = Postgres
+		c.Storage.DSN = dsn
+	}
+}
+
+// WithPostgresSchema sets the schema Pulse's tables go in on PostgreSQL
+// (default "pulse") — for example to keep two applications that share a
+// database apart.
+func WithPostgresSchema(name string) Option {
+	return func(c *Config) { c.Storage.Schema = name }
+}
+
+// WithStorage makes Pulse use s instead of a built-in backend: a
+// [PostgresStorage] on a *sql.DB you manage, say, or a third-party backend.
+// Pulse closes s on Shutdown. Some features need a built-in backend —
+// rollups that survive restarts, lifecycle events, log capture and
+// capacity reporting.
+func WithStorage(s Storage) Option {
+	return func(c *Config) { c.Storage.Backend = s }
+}
+
 // --- Tracing ---
 
 // WithTracingDisabled turns off the request-tracing middleware entirely.

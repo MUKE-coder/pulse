@@ -35,8 +35,14 @@ import (
 )
 
 // SQLiteStorage persists Pulse metrics to a SQLite database file.
-type SQLiteStorage struct {
+type SQLiteStorage struct{ *sqlStore }
+
+// sqlStore is the implementation SQLiteStorage and PostgresStorage share;
+// see storage_sql.go.
+type sqlStore struct {
 	db        *sql.DB
+	d         *sqlDialect
+	ownsDB    bool // Close closes db
 	appName   string
 	startTime time.Time
 	path      string // database file, for size reporting; "" for in-memory
@@ -93,17 +99,25 @@ func openSQLiteStorage(dsn, appName string, queueSize int) (*SQLiteStorage, erro
 		return nil, err
 	}
 
-	s := &SQLiteStorage{
+	return &SQLiteStorage{newSQLStore(db, sqliteDialect, appName, sqliteFilePath(dsn), queueSize, true)}, nil
+}
+
+// newSQLStore wraps a database whose schema is ready and starts its batch
+// writer. path is the database file, for size reporting ("" for none).
+func newSQLStore(db *sql.DB, d *sqlDialect, appName, path string, queueSize int, ownsDB bool) *sqlStore {
+	s := &sqlStore{
 		db:         db,
+		d:          d,
+		ownsDB:     ownsDB,
 		appName:    appName,
 		startTime:  time.Now(),
-		path:       sqliteFilePath(dsn),
+		path:       path,
 		queue:      make(chan sqliteWrite, queueSize),
 		flushReq:   make(chan chan struct{}),
 		writerDone: make(chan struct{}),
 	}
 	go s.runWriter()
-	return s, nil
+	return s
 }
 
 // Batched writer tuning; see the design notes at the top of this file.
@@ -127,7 +141,7 @@ type sqliteWrite struct {
 // enqueue queues a metric write for the batch writer. It never blocks: when
 // the queue is full the write is dropped, counted, and errSQLiteQueueFull is
 // returned.
-func (s *SQLiteStorage) enqueue(query string, args ...any) error {
+func (s *sqlStore) enqueue(query string, args ...any) error {
 	s.queueMu.RLock()
 	defer s.queueMu.RUnlock()
 	if s.closed {
@@ -145,7 +159,7 @@ func (s *SQLiteStorage) enqueue(query string, args ...any) error {
 // sync blocks until every write queued before the call has been committed,
 // so a read (or a synchronous write) observes everything stored before it.
 // It must not be called while holding writeMu.
-func (s *SQLiteStorage) sync() {
+func (s *sqlStore) sync() {
 	ack := make(chan struct{})
 	select {
 	case s.flushReq <- ack:
@@ -157,7 +171,7 @@ func (s *SQLiteStorage) sync() {
 // runWriter is the single goroutine that commits queued writes: when a batch
 // fills, when the flush interval elapses, and on sync requests. It exits
 // after draining the queue once Close closes it.
-func (s *SQLiteStorage) runWriter() {
+func (s *sqlStore) runWriter() {
 	defer close(s.writerDone)
 	ticker := time.NewTicker(sqliteFlushInterval)
 	defer ticker.Stop()
@@ -202,7 +216,7 @@ func (s *SQLiteStorage) runWriter() {
 
 // commit writes batch in one transaction. A failed statement is counted and
 // skipped; it doesn't abort the rest of the batch.
-func (s *SQLiteStorage) commit(batch []sqliteWrite) {
+func (s *sqlStore) commit(batch []sqliteWrite) {
 	if len(batch) == 0 {
 		return
 	}
@@ -218,13 +232,13 @@ func (s *SQLiteStorage) commit(batch []sqliteWrite) {
 	for _, w := range batch {
 		st, ok := stmts[w.query]
 		if !ok {
-			if st, err = tx.Prepare(w.query); err != nil {
+			if st, err = tx.Prepare(s.d.sql(w.query)); err != nil {
 				s.failed.Add(1)
 				continue
 			}
 			stmts[w.query] = st
 		}
-		if _, err := st.Exec(w.args...); err != nil {
+		if _, err := st.Exec(s.d.args(w.args)...); err != nil {
 			s.failed.Add(1)
 		}
 	}
@@ -235,7 +249,7 @@ func (s *SQLiteStorage) commit(batch []sqliteWrite) {
 
 // writeQueueStats reports the batch writer's queue depth and how many writes
 // were dropped (queue full) or failed since the storage was opened.
-func (s *SQLiteStorage) writeQueueStats() (depth int, dropped, failed int64) {
+func (s *sqlStore) writeQueueStats() (depth int, dropped, failed int64) {
 	return len(s.queue), s.dropped.Load(), s.failed.Load()
 }
 
@@ -503,7 +517,7 @@ func firstLine(s string) string {
 
 // --- Request metrics ---
 
-func (s *SQLiteStorage) StoreRequest(m RequestMetric) error {
+func (s *sqlStore) StoreRequest(m RequestMetric) error {
 	return s.enqueue(
 		`INSERT INTO requests (timestamp, method, path, status_code, latency_ns, request_size, response_size, client_ip, user_agent, error, trace_id, span_id, parent_span_id)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -512,7 +526,7 @@ func (s *SQLiteStorage) StoreRequest(m RequestMetric) error {
 	)
 }
 
-func (s *SQLiteStorage) GetRequests(f RequestFilter) ([]RequestMetric, error) {
+func (s *sqlStore) GetRequests(f RequestFilter) ([]RequestMetric, error) {
 	s.sync()
 	var (
 		clauses []string
@@ -555,7 +569,7 @@ func (s *SQLiteStorage) GetRequests(f RequestFilter) ([]RequestMetric, error) {
 		q += fmt.Sprintf(" OFFSET %d", f.Offset)
 	}
 
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -582,7 +596,7 @@ func (s *SQLiteStorage) GetRequests(f RequestFilter) ([]RequestMetric, error) {
 	return out, rows.Err()
 }
 
-func (s *SQLiteStorage) GetRouteStats(tr TimeRange) ([]RouteStats, error) {
+func (s *sqlStore) GetRouteStats(tr TimeRange) ([]RouteStats, error) {
 	reqs, err := s.GetRequests(RequestFilter{TimeRange: tr})
 	if err != nil {
 		return nil, err
@@ -601,7 +615,7 @@ func (s *SQLiteStorage) GetRouteStats(tr TimeRange) ([]RouteStats, error) {
 	return out, nil
 }
 
-func (s *SQLiteStorage) GetRouteDetail(method, path string, tr TimeRange) (*RouteDetail, error) {
+func (s *sqlStore) GetRouteDetail(method, path string, tr TimeRange) (*RouteDetail, error) {
 	reqs, err := s.GetRequests(RequestFilter{TimeRange: tr, Method: method, Path: path})
 	if err != nil {
 		return nil, err
@@ -626,7 +640,7 @@ func (s *SQLiteStorage) GetRouteDetail(method, path string, tr TimeRange) (*Rout
 
 // --- Query metrics ---
 
-func (s *SQLiteStorage) StoreQuery(m QueryMetric) error {
+func (s *sqlStore) StoreQuery(m QueryMetric) error {
 	return s.enqueue(
 		`INSERT INTO queries (timestamp, sql_text, normalized_sql, duration_ns, rows_affected, error, operation, table_name, caller_file, caller_line, request_trace_id, span_id, parent_span_id)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -635,7 +649,7 @@ func (s *SQLiteStorage) StoreQuery(m QueryMetric) error {
 	)
 }
 
-func (s *SQLiteStorage) GetSlowQueries(threshold time.Duration, limit int) ([]QueryMetric, error) {
+func (s *sqlStore) GetSlowQueries(threshold time.Duration, limit int) ([]QueryMetric, error) {
 	s.sync()
 	q := `SELECT timestamp, sql_text, normalized_sql, duration_ns, rows_affected, error, operation, table_name, caller_file, caller_line, request_trace_id, span_id, parent_span_id
 	      FROM queries WHERE duration_ns >= ? ORDER BY duration_ns DESC`
@@ -644,7 +658,7 @@ func (s *SQLiteStorage) GetSlowQueries(threshold time.Duration, limit int) ([]Qu
 		q += " LIMIT ?"
 		args = append(args, limit)
 	}
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -666,12 +680,12 @@ func (s *SQLiteStorage) GetSlowQueries(threshold time.Duration, limit int) ([]Qu
 	return out, rows.Err()
 }
 
-func (s *SQLiteStorage) GetQueryPatterns(tr TimeRange) ([]QueryPattern, error) {
+func (s *sqlStore) GetQueryPatterns(tr TimeRange) ([]QueryPattern, error) {
 	s.sync()
-	rows, err := s.db.Query(
+	rows, err := s.query(
 		`SELECT normalized_sql, operation, table_name, COUNT(*) AS count,
-		        SUM(duration_ns) AS total, MAX(duration_ns) AS max,
-		        SUM(CASE WHEN error <> '' THEN 1 ELSE 0 END) AS errs
+		        CAST(SUM(duration_ns) AS BIGINT) AS total, MAX(duration_ns) AS max,
+		        CAST(SUM(CASE WHEN error <> '' THEN 1 ELSE 0 END) AS BIGINT) AS errs
 		 FROM queries
 		 WHERE timestamp BETWEEN ? AND ?
 		 GROUP BY normalized_sql, operation, table_name
@@ -701,7 +715,7 @@ func (s *SQLiteStorage) GetQueryPatterns(tr TimeRange) ([]QueryPattern, error) {
 	return out, rows.Err()
 }
 
-func (s *SQLiteStorage) StoreN1Detection(d N1Detection) error {
+func (s *sqlStore) StoreN1Detection(d N1Detection) error {
 	return s.enqueue(
 		`INSERT INTO n1_detections (detected_at, pattern, count, total_duration_ns, avg_duration_ns, request_trace_id, route, suggested_fix)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -710,9 +724,9 @@ func (s *SQLiteStorage) StoreN1Detection(d N1Detection) error {
 	)
 }
 
-func (s *SQLiteStorage) GetN1Detections(tr TimeRange) ([]N1Detection, error) {
+func (s *sqlStore) GetN1Detections(tr TimeRange) ([]N1Detection, error) {
 	s.sync()
-	rows, err := s.db.Query(
+	rows, err := s.query(
 		`SELECT detected_at, pattern, count, total_duration_ns, avg_duration_ns, request_trace_id, route, suggested_fix
 		 FROM n1_detections
 		 WHERE detected_at BETWEEN ? AND ?
@@ -741,14 +755,14 @@ func (s *SQLiteStorage) GetN1Detections(tr TimeRange) ([]N1Detection, error) {
 	return out, rows.Err()
 }
 
-func (s *SQLiteStorage) UpdatePoolStats(p PoolStats) error {
+func (s *sqlStore) UpdatePoolStats(p PoolStats) error {
 	s.poolMu.Lock()
 	defer s.poolMu.Unlock()
 	s.pool = &p
 	return nil
 }
 
-func (s *SQLiteStorage) GetConnectionPoolStats() (*PoolStats, error) {
+func (s *sqlStore) GetConnectionPoolStats() (*PoolStats, error) {
 	s.poolMu.RLock()
 	defer s.poolMu.RUnlock()
 	if s.pool == nil {
@@ -760,7 +774,7 @@ func (s *SQLiteStorage) GetConnectionPoolStats() (*PoolStats, error) {
 
 // --- Runtime metrics ---
 
-func (s *SQLiteStorage) StoreRuntime(m RuntimeMetric) error {
+func (s *sqlStore) StoreRuntime(m RuntimeMetric) error {
 	return s.enqueue(
 		`INSERT INTO runtime_samples (timestamp, heap_alloc, heap_in_use, heap_objects, stack_in_use, total_alloc, sys, num_goroutine, gc_pause_ns, num_gc, gc_cpu_fraction)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -769,9 +783,9 @@ func (s *SQLiteStorage) StoreRuntime(m RuntimeMetric) error {
 	)
 }
 
-func (s *SQLiteStorage) GetRuntimeHistory(tr TimeRange) ([]RuntimeMetric, error) {
+func (s *sqlStore) GetRuntimeHistory(tr TimeRange) ([]RuntimeMetric, error) {
 	s.sync()
-	rows, err := s.db.Query(
+	rows, err := s.query(
 		`SELECT timestamp, heap_alloc, heap_in_use, heap_objects, stack_in_use, total_alloc, sys, num_goroutine, gc_pause_ns, num_gc, gc_cpu_fraction
 		 FROM runtime_samples
 		 WHERE timestamp BETWEEN ? AND ?
@@ -800,20 +814,20 @@ func (s *SQLiteStorage) GetRuntimeHistory(tr TimeRange) ([]RuntimeMetric, error)
 
 // --- Error records ---
 
-func (s *SQLiteStorage) StoreError(e ErrorRecord) error {
+func (s *sqlStore) StoreError(e ErrorRecord) error {
 	ctxJSON, _ := json.Marshal(e.RequestContext)
 
 	// UPSERT by fingerprint: increment count + bump last_seen on duplicate.
 	return s.enqueue(
-		`INSERT INTO errors (fingerprint, id, method, route, error_message, error_type, stack_trace, request_ctx, count, first_seen, last_seen, muted, resolved, trace_id, span_id)
+		`INSERT INTO errors AS cur (fingerprint, id, method, route, error_message, error_type, stack_trace, request_ctx, count, first_seen, last_seen, muted, resolved, trace_id, span_id)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
 		 ON CONFLICT (fingerprint) DO UPDATE SET
-		     count       = count + 1,
+		     count       = cur.count + 1,
 		     last_seen   = excluded.last_seen,
-		     stack_trace = CASE WHEN excluded.stack_trace <> '' THEN excluded.stack_trace ELSE errors.stack_trace END,
-		     request_ctx = CASE WHEN excluded.request_ctx <> '' THEN excluded.request_ctx ELSE errors.request_ctx END,
-		     trace_id    = CASE WHEN excluded.trace_id <> '' THEN excluded.trace_id ELSE errors.trace_id END,
-		     span_id     = CASE WHEN excluded.trace_id <> '' THEN excluded.span_id ELSE errors.span_id END
+		     stack_trace = CASE WHEN excluded.stack_trace <> '' THEN excluded.stack_trace ELSE cur.stack_trace END,
+		     request_ctx = CASE WHEN excluded.request_ctx <> '' THEN excluded.request_ctx ELSE cur.request_ctx END,
+		     trace_id    = CASE WHEN excluded.trace_id <> '' THEN excluded.trace_id ELSE cur.trace_id END,
+		     span_id     = CASE WHEN excluded.trace_id <> '' THEN excluded.span_id ELSE cur.span_id END
 		`,
 		e.Fingerprint, e.ID, e.Method, e.Route, e.ErrorMessage, e.ErrorType,
 		e.StackTrace, string(ctxJSON), e.Count, e.FirstSeen.UnixNano(), e.LastSeen.UnixNano(),
@@ -821,7 +835,7 @@ func (s *SQLiteStorage) StoreError(e ErrorRecord) error {
 	)
 }
 
-func (s *SQLiteStorage) GetErrors(f ErrorFilter) ([]ErrorRecord, error) {
+func (s *sqlStore) GetErrors(f ErrorFilter) ([]ErrorRecord, error) {
 	s.sync()
 	var (
 		clauses []string
@@ -864,7 +878,7 @@ func (s *SQLiteStorage) GetErrors(f ErrorFilter) ([]ErrorRecord, error) {
 		q += fmt.Sprintf(" OFFSET %d", f.Offset)
 	}
 
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -880,7 +894,7 @@ func (s *SQLiteStorage) GetErrors(f ErrorFilter) ([]ErrorRecord, error) {
 	return out, rows.Err()
 }
 
-func (s *SQLiteStorage) GetErrorGroups(tr TimeRange) ([]ErrorGroup, error) {
+func (s *sqlStore) GetErrorGroups(tr TimeRange) ([]ErrorGroup, error) {
 	errs, err := s.GetErrors(ErrorFilter{TimeRange: tr})
 	if err != nil {
 		return nil, err
@@ -904,9 +918,9 @@ func (s *SQLiteStorage) GetErrorGroups(tr TimeRange) ([]ErrorGroup, error) {
 	return out, nil
 }
 
-func (s *SQLiteStorage) GetErrorByID(id string) (*ErrorRecord, error) {
+func (s *sqlStore) GetErrorByID(id string) (*ErrorRecord, error) {
 	s.sync()
-	row := s.db.QueryRow(
+	row := s.queryRow(
 		`SELECT fingerprint, id, method, route, error_message, error_type, stack_trace, request_ctx, count, first_seen, last_seen, muted, resolved, trace_id, span_id FROM errors WHERE id = ?`,
 		id,
 	)
@@ -920,7 +934,7 @@ func (s *SQLiteStorage) GetErrorByID(id string) (*ErrorRecord, error) {
 	return &e, nil
 }
 
-func (s *SQLiteStorage) UpdateError(id string, updates map[string]interface{}) error {
+func (s *sqlStore) UpdateError(id string, updates map[string]interface{}) error {
 	s.sync()
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -944,7 +958,7 @@ func (s *SQLiteStorage) UpdateError(id string, updates map[string]interface{}) e
 		return nil
 	}
 	args = append(args, id)
-	res, err := s.db.Exec(`UPDATE errors SET `+strings.Join(sets, ", ")+` WHERE id = ?`, args...)
+	res, err := s.exec(`UPDATE errors SET `+strings.Join(sets, ", ")+` WHERE id = ?`, args...)
 	if err != nil {
 		return err
 	}
@@ -954,11 +968,11 @@ func (s *SQLiteStorage) UpdateError(id string, updates map[string]interface{}) e
 	return nil
 }
 
-func (s *SQLiteStorage) DeleteError(id string) error {
+func (s *sqlStore) DeleteError(id string) error {
 	s.sync()
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	res, err := s.db.Exec(`DELETE FROM errors WHERE id = ?`, id)
+	res, err := s.exec(`DELETE FROM errors WHERE id = ?`, id)
 	if err != nil {
 		return err
 	}
@@ -1000,7 +1014,7 @@ func scanErrorRow(r rowScanner) (ErrorRecord, error) {
 
 // --- Health results ---
 
-func (s *SQLiteStorage) StoreHealthResult(r HealthCheckResult) error {
+func (s *sqlStore) StoreHealthResult(r HealthCheckResult) error {
 	meta, _ := json.Marshal(r.Metadata)
 	return s.enqueue(
 		`INSERT INTO health_results (timestamp, name, type, status, latency_ns, error, metadata)
@@ -1009,7 +1023,7 @@ func (s *SQLiteStorage) StoreHealthResult(r HealthCheckResult) error {
 	)
 }
 
-func (s *SQLiteStorage) GetHealthHistory(name string, limit int) ([]HealthCheckResult, error) {
+func (s *sqlStore) GetHealthHistory(name string, limit int) ([]HealthCheckResult, error) {
 	s.sync()
 	q := `SELECT timestamp, name, type, status, latency_ns, error, metadata
 	      FROM health_results WHERE name = ? ORDER BY timestamp DESC`
@@ -1018,7 +1032,7 @@ func (s *SQLiteStorage) GetHealthHistory(name string, limit int) ([]HealthCheckR
 		q += " LIMIT ?"
 		args = append(args, limit)
 	}
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1043,9 +1057,9 @@ func (s *SQLiteStorage) GetHealthHistory(name string, limit int) ([]HealthCheckR
 	return out, rows.Err()
 }
 
-func (s *SQLiteStorage) GetLatestHealthResults() map[string]HealthCheckResult {
+func (s *sqlStore) GetLatestHealthResults() map[string]HealthCheckResult {
 	s.sync()
-	rows, err := s.db.Query(
+	rows, err := s.query(
 		`SELECT h.timestamp, h.name, h.type, h.status, h.latency_ns, h.error, h.metadata
 		 FROM health_results h
 		 INNER JOIN (
@@ -1078,23 +1092,28 @@ func (s *SQLiteStorage) GetLatestHealthResults() map[string]HealthCheckResult {
 
 // --- Alerts ---
 
-func (s *SQLiteStorage) StoreAlert(a AlertRecord) error {
+func (s *sqlStore) StoreAlert(a AlertRecord) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	var resolvedAt any
 	if a.ResolvedAt != nil {
 		resolvedAt = a.ResolvedAt.UnixNano()
 	}
-	_, err := s.db.Exec(
-		`INSERT OR REPLACE INTO alerts (id, rule_name, metric, value, threshold, operator, severity, state, route, message, fired_at, resolved_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	_, err := s.exec(
+		`INSERT INTO alerts (id, rule_name, metric, value, threshold, operator, severity, state, route, message, fired_at, resolved_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT (id) DO UPDATE SET
+		     rule_name = excluded.rule_name, metric = excluded.metric, value = excluded.value,
+		     threshold = excluded.threshold, operator = excluded.operator, severity = excluded.severity,
+		     state = excluded.state, route = excluded.route, message = excluded.message,
+		     fired_at = excluded.fired_at, resolved_at = excluded.resolved_at`,
 		a.ID, a.RuleName, a.Metric, a.Value, a.Threshold, a.Operator, a.Severity,
 		string(a.State), a.Route, a.Message, a.FiredAt.UnixNano(), resolvedAt,
 	)
 	return err
 }
 
-func (s *SQLiteStorage) GetAlerts(f AlertFilter) ([]AlertRecord, error) {
+func (s *sqlStore) GetAlerts(f AlertFilter) ([]AlertRecord, error) {
 	var (
 		clauses []string
 		args    []any
@@ -1123,7 +1142,7 @@ func (s *SQLiteStorage) GetAlerts(f AlertFilter) ([]AlertRecord, error) {
 	if f.Limit > 0 {
 		q += fmt.Sprintf(" LIMIT %d", f.Limit)
 	}
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1153,7 +1172,7 @@ func (s *SQLiteStorage) GetAlerts(f AlertFilter) ([]AlertRecord, error) {
 
 // --- Dependencies ---
 
-func (s *SQLiteStorage) StoreDependencyMetric(m DependencyMetric) error {
+func (s *sqlStore) StoreDependencyMetric(m DependencyMetric) error {
 	return s.enqueue(
 		`INSERT INTO dependencies (timestamp, name, method, url, status_code, latency_ns, request_size, response_size, error)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1162,9 +1181,9 @@ func (s *SQLiteStorage) StoreDependencyMetric(m DependencyMetric) error {
 	)
 }
 
-func (s *SQLiteStorage) GetDependencyStats(tr TimeRange) ([]DependencyStats, error) {
+func (s *sqlStore) GetDependencyStats(tr TimeRange) ([]DependencyStats, error) {
 	s.sync()
-	rows, err := s.db.Query(
+	rows, err := s.query(
 		`SELECT timestamp, name, status_code, latency_ns, error
 		 FROM dependencies WHERE timestamp BETWEEN ? AND ?`,
 		tr.Start.UnixNano(), tr.End.UnixNano(),
@@ -1254,7 +1273,7 @@ func (s *SQLiteStorage) GetDependencyStats(tr TimeRange) ([]DependencyStats, err
 
 // --- Test runs ---
 
-func (s *SQLiteStorage) StoreTestRun(r TestRun) error {
+func (s *sqlStore) StoreTestRun(r TestRun) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	meta, _ := json.Marshal(r.Metadata)
@@ -1262,16 +1281,18 @@ func (s *SQLiteStorage) StoreTestRun(r TestRun) error {
 	if !r.EndedAt.IsZero() {
 		endedAt = r.EndedAt.UnixNano()
 	}
-	_, err := s.db.Exec(
-		`INSERT OR REPLACE INTO test_runs (id, name, type, started_at, ended_at, metadata) VALUES (?, ?, ?, ?, ?, ?)`,
+	_, err := s.exec(
+		`INSERT INTO test_runs (id, name, type, started_at, ended_at, metadata) VALUES (?, ?, ?, ?, ?, ?)
+		 ON CONFLICT (id) DO UPDATE SET name = excluded.name, type = excluded.type,
+		     started_at = excluded.started_at, ended_at = excluded.ended_at, metadata = excluded.metadata`,
 		r.ID, r.Name, r.Type, r.StartedAt.UnixNano(), endedAt, string(meta),
 	)
 	return err
 }
 
-func (s *SQLiteStorage) GetTestRuns(tr TimeRange) ([]TestRun, error) {
+func (s *sqlStore) GetTestRuns(tr TimeRange) ([]TestRun, error) {
 	// "Overlap" rules — see MemoryStorage.GetTestRuns.
-	rows, err := s.db.Query(
+	rows, err := s.query(
 		`SELECT id, name, type, started_at, ended_at, metadata FROM test_runs
 		 WHERE COALESCE(ended_at, started_at) >= ?
 		   AND started_at <= ?
@@ -1307,7 +1328,7 @@ func (s *SQLiteStorage) GetTestRuns(tr TimeRange) ([]TestRun, error) {
 
 // --- Overview ---
 
-func (s *SQLiteStorage) GetOverview(tr TimeRange) (*Overview, error) {
+func (s *sqlStore) GetOverview(tr TimeRange) (*Overview, error) {
 	reqs, err := s.GetRequests(RequestFilter{TimeRange: tr})
 	if err != nil {
 		return nil, err
@@ -1349,7 +1370,7 @@ func (s *SQLiteStorage) GetOverview(tr TimeRange) (*Overview, error) {
 	recent, _ := s.GetErrors(ErrorFilter{TimeRange: tr, Limit: 5})
 
 	var activeAlerts int
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM alerts WHERE state = 'firing'`).Scan(&activeAlerts)
+	_ = s.queryRow(`SELECT COUNT(*) FROM alerts WHERE state = 'firing'`).Scan(&activeAlerts)
 
 	return &Overview{
 		AppName:          s.appName,
@@ -1371,7 +1392,7 @@ func (s *SQLiteStorage) GetOverview(tr TimeRange) (*Overview, error) {
 
 // --- Maintenance ---
 
-func (s *SQLiteStorage) Cleanup(retention time.Duration) error {
+func (s *sqlStore) Cleanup(retention time.Duration) error {
 	cutoff := time.Now().Add(-retention).UnixNano()
 
 	s.sync()
@@ -1394,7 +1415,7 @@ func (s *SQLiteStorage) Cleanup(retention time.Duration) error {
 		{"logs", "timestamp"},
 	}
 	for _, d := range deletes {
-		if _, err := s.db.Exec(
+		if _, err := s.exec(
 			fmt.Sprintf(`DELETE FROM %s WHERE %s < ?`, d.table, d.column), cutoff,
 		); err != nil {
 			return fmt.Errorf("pulse/sqlite cleanup %s: %w", d.table, err)
@@ -1402,7 +1423,7 @@ func (s *SQLiteStorage) Cleanup(retention time.Duration) error {
 	}
 	// Test runs use a CASE expression because ended_at may be NULL for
 	// still-running test runs.
-	if _, err := s.db.Exec(
+	if _, err := s.exec(
 		`DELETE FROM test_runs WHERE COALESCE(ended_at, started_at) < ?`, cutoff,
 	); err != nil {
 		return fmt.Errorf("pulse/sqlite cleanup test_runs: %w", err)
@@ -1410,7 +1431,7 @@ func (s *SQLiteStorage) Cleanup(retention time.Duration) error {
 	return nil
 }
 
-func (s *SQLiteStorage) Reset() error {
+func (s *sqlStore) Reset() error {
 	s.sync()
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -1419,7 +1440,7 @@ func (s *SQLiteStorage) Reset() error {
 		"health_results", "alerts", "dependencies", "n1_detections", "test_runs",
 		"request_rollups", "latency_rollups", "slo_rollups", "logs"}
 	for _, t := range tables {
-		if _, err := s.db.Exec(`DELETE FROM ` + t); err != nil {
+		if _, err := s.exec(`DELETE FROM ` + t); err != nil {
 			return fmt.Errorf("pulse/sqlite reset %s: %w", t, err)
 		}
 	}
@@ -1432,13 +1453,13 @@ func (s *SQLiteStorage) Reset() error {
 }
 
 // ping checks the database answers; used by the pulse_storage health check.
-func (s *SQLiteStorage) ping(ctx context.Context) error {
+func (s *sqlStore) ping(ctx context.Context) error {
 	return s.db.PingContext(ctx)
 }
 
 // Close commits every queued write, stops the writer, and closes the
 // database. Store calls after Close return errSQLiteClosed.
-func (s *SQLiteStorage) Close() error {
+func (s *sqlStore) Close() error {
 	s.queueMu.Lock()
 	if !s.closed {
 		s.closed = true
@@ -1446,6 +1467,9 @@ func (s *SQLiteStorage) Close() error {
 	}
 	s.queueMu.Unlock()
 	<-s.writerDone
+	if !s.ownsDB {
+		return nil
+	}
 	return s.db.Close()
 }
 

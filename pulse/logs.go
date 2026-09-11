@@ -287,6 +287,9 @@ func (s *MemoryStorage) queryLogs(f logFilter) ([]LogRecord, error) {
 	return newestLogs(rb.Filter(f.match), f.Limit), nil
 }
 
+// likeEscaper makes text match literally in a LIKE pattern with ESCAPE '\'.
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
 // newestLogs sorts lines by time and keeps the newest limit of them.
 func newestLogs(recs []LogRecord, limit int) []LogRecord {
 	sort.SliceStable(recs, func(i, j int) bool { return recs[i].Time.Before(recs[j].Time) })
@@ -298,7 +301,7 @@ func newestLogs(recs []LogRecord, limit int) []LogRecord {
 
 // --- SQLiteStorage ---
 
-func (s *SQLiteStorage) storeLog(r LogRecord) error {
+func (s *sqlStore) storeLog(r LogRecord) error {
 	var attrs string
 	if len(r.Attrs) > 0 {
 		b, err := json.Marshal(r.Attrs)
@@ -313,7 +316,7 @@ func (s *SQLiteStorage) storeLog(r LogRecord) error {
 	)
 }
 
-func (s *SQLiteStorage) queryLogs(f logFilter) ([]LogRecord, error) {
+func (s *sqlStore) queryLogs(f logFilter) ([]LogRecord, error) {
 	s.sync()
 	q := `SELECT timestamp, level, message, attrs, trace_id, span_id, instance_id FROM logs WHERE level >= ?`
 	args := []any{int(f.MinLevel)}
@@ -330,8 +333,8 @@ func (s *SQLiteStorage) queryLogs(f logFilter) ([]LogRecord, error) {
 		args = append(args, f.TraceID)
 	}
 	if f.Contains != "" {
-		q += ` AND instr(lower(message), ?) > 0`
-		args = append(args, strings.ToLower(f.Contains))
+		q += ` AND lower(message) LIKE ? ESCAPE '\'`
+		args = append(args, "%"+likeEscaper.Replace(strings.ToLower(f.Contains))+"%")
 	}
 	q += ` ORDER BY timestamp DESC`
 	if f.Limit > 0 {
@@ -339,7 +342,7 @@ func (s *SQLiteStorage) queryLogs(f logFilter) ([]LogRecord, error) {
 		args = append(args, f.Limit)
 	}
 
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.query(q, args...)
 	if err != nil {
 		return nil, err
 	}

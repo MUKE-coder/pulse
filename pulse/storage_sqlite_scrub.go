@@ -23,13 +23,13 @@ var _ errorScrubber = (*SQLiteStorage)(nil)
 
 // scrubStoredErrors re-redacts every stored error record, unless this
 // database has already been scrubbed. It returns how many records changed.
-func (s *SQLiteStorage) scrubStoredErrors(r *redactor) (int, error) {
+func (s *sqlStore) scrubStoredErrors(r *redactor) (int, error) {
 	s.sync()
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
 	var done int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM pulse_meta WHERE key = ?`, scrubMigrationKey).Scan(&done); err != nil {
+	if err := s.queryRow(`SELECT COUNT(*) FROM pulse_meta WHERE key = ?`, scrubMigrationKey).Scan(&done); err != nil {
 		return 0, err
 	}
 	if done > 0 {
@@ -37,7 +37,7 @@ func (s *SQLiteStorage) scrubStoredErrors(r *redactor) (int, error) {
 	}
 
 	type row struct{ fingerprint, message, ctx string }
-	rows, err := s.db.Query(`SELECT fingerprint, error_message, request_ctx FROM errors`)
+	rows, err := s.query(`SELECT fingerprint, error_message, request_ctx FROM errors`)
 	if err != nil {
 		return 0, err
 	}
@@ -79,13 +79,15 @@ func (s *SQLiteStorage) scrubStoredErrors(r *redactor) (int, error) {
 		if msg == rw.message && ctx == rw.ctx {
 			continue
 		}
-		if _, err := tx.Exec(`UPDATE errors SET error_message = ?, request_ctx = ? WHERE fingerprint = ?`,
+		if _, err := s.txExec(tx, `UPDATE errors SET error_message = ?, request_ctx = ? WHERE fingerprint = ?`,
 			msg, ctx, rw.fingerprint); err != nil {
 			return 0, err
 		}
 		changed++
 	}
-	if _, err := tx.Exec(`INSERT INTO pulse_meta (key, value) VALUES (?, ?)`,
+	// Instances sharing a PostgreSQL database may both scrub; the second
+	// finds nothing to change and must not fail on the marker.
+	if _, err := s.txExec(tx, `INSERT INTO pulse_meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING`,
 		scrubMigrationKey, time.Now().UTC().Format(time.RFC3339)); err != nil {
 		return 0, err
 	}

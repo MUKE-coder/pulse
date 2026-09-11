@@ -5,10 +5,10 @@ import (
 	"time"
 )
 
-// Behaviour every Storage backend must share. Each test runs against both
-// MemoryStorage and SQLiteStorage so the backends can't drift apart again —
-// v1.0.0 shipped with test-run and alert-resolution semantics that differed
-// between them.
+// Behaviour every Storage backend must share. Each test runs against
+// MemoryStorage, SQLiteStorage and (when PULSE_TEST_POSTGRES_DSN is set)
+// PostgresStorage so the backends can't drift apart again — v1.0.0 shipped
+// with test-run and alert-resolution semantics that differed between them.
 
 func forEachBackend(t *testing.T, fn func(t *testing.T, s Storage)) {
 	backends := []struct {
@@ -17,6 +17,7 @@ func forEachBackend(t *testing.T, fn func(t *testing.T, s Storage)) {
 	}{
 		{"memory", func(t *testing.T) Storage { return NewMemoryStorage("conformance") }},
 		{"sqlite", func(t *testing.T) Storage { return newSQLiteForTest(t) }},
+		{"postgres", func(t *testing.T) Storage { return newPostgresForTest(t) }},
 	}
 	for _, b := range backends {
 		t.Run(b.name, func(t *testing.T) { fn(t, b.open(t)) })

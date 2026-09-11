@@ -70,7 +70,7 @@ func Mount(ctx context.Context, router *gin.Engine, db *gorm.DB, opts ...Option)
 			"Set Dashboard.SecretKeyFile to persist the key.")
 	}
 
-	if cfg.Storage.Driver == Memory && !cfg.DevMode {
+	if cfg.Storage.Backend == nil && cfg.Storage.Driver == Memory && !cfg.DevMode {
 		log.Printf("[pulse] note: in-memory storage keeps no history across restarts, so the " +
 			"dashboard starts empty after every deploy or crash. Use pulse.WithSQLite(path) to keep it.")
 	}
@@ -80,11 +80,20 @@ func Mount(ctx context.Context, router *gin.Engine, db *gorm.DB, opts ...Option)
 	p := newPulse(ctx, cfg)
 
 	// Initialize storage based on the configured driver.
-	switch cfg.Storage.Driver {
-	case SQLite:
+	switch {
+	case cfg.Storage.Backend != nil:
+		p.storage = cfg.Storage.Backend
+	case cfg.Storage.Driver == SQLite:
 		store, err := NewSQLiteStorage(cfg.Storage.DSN, cfg.AppName)
 		if err != nil {
 			log.Fatalf("[pulse] failed to open SQLite storage at %q: %v", cfg.Storage.DSN, err)
+		}
+		p.storage = store
+	case cfg.Storage.Driver == Postgres:
+		// The DSN may carry a password, so it isn't logged.
+		store, err := OpenPostgresStorage(cfg.Storage.DSN, cfg.AppName, cfg.Storage.Schema)
+		if err != nil {
+			log.Fatalf("[pulse] failed to open PostgreSQL storage: %v", err)
 		}
 		p.storage = store
 	default:
@@ -148,8 +157,8 @@ func Mount(ctx context.Context, router *gin.Engine, db *gorm.DB, opts ...Option)
 		p.AddHealthCheck(DatabaseHealthCheck(db))
 	}
 
-	// Surface trouble with Pulse's own SQLite storage (Memory can't fail).
-	if cfg.Storage.Driver == SQLite && boolValue(cfg.Health.Enabled) {
+	// Surface trouble with Pulse's own database storage (Memory can't fail).
+	if _, db := p.storage.(interface{ ping(context.Context) error }); db && boolValue(cfg.Health.Enabled) {
 		p.AddHealthCheck(storageHealthCheck(p))
 	}
 
@@ -213,7 +222,7 @@ func Mount(ctx context.Context, router *gin.Engine, db *gorm.DB, opts ...Option)
 	registerDashboardRoutes(router, prefix, cfg)
 
 	log.Printf("[pulse] mounted at %s — dashboard at %s/ui/ (storage: %s)",
-		prefix, prefix, storageDriverName(cfg.Storage.Driver))
+		prefix, prefix, p.storageName())
 	if cfg.DevMode {
 		log.Printf("[pulse] dev mode enabled — verbose logging active")
 	}
@@ -436,7 +445,23 @@ func storageDriverName(d StorageDriver) string {
 	switch d {
 	case SQLite:
 		return "SQLite"
+	case Postgres:
+		return "Postgres"
 	default:
 		return "Memory"
+	}
+}
+
+// storageName names the backend in use, which WithStorage may have supplied.
+func (p *Pulse) storageName() string {
+	switch p.storage.(type) {
+	case *MemoryStorage:
+		return "Memory"
+	case *SQLiteStorage:
+		return "SQLite"
+	case *PostgresStorage:
+		return "Postgres"
+	default:
+		return fmt.Sprintf("%T", p.storage)
 	}
 }

@@ -90,7 +90,7 @@ func lifecycleHandler(p *Pulse) gin.HandlerFunc {
 		c.JSON(http.StatusOK, gin.H{
 			"events":      events,
 			"instance_id": p.config.InstanceID,
-			"storage":     storageDriverName(p.config.Storage.Driver),
+			"storage":     p.storageName(),
 			"persistent":  persistent,
 			"data_since":  p.rollups.dataSince(),
 		})
@@ -140,21 +140,21 @@ func (s *MemoryStorage) lastRequestAt() (time.Time, bool) {
 
 // --- SQLiteStorage ---
 
-func (s *SQLiteStorage) storeLifecycleEvent(e lifecycleEvent) error {
+func (s *sqlStore) storeLifecycleEvent(e lifecycleEvent) error {
 	var gapFrom any
 	if e.GapFrom != nil {
 		gapFrom = e.GapFrom.UnixNano()
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	_, err := s.db.Exec(
+	_, err := s.exec(
 		`INSERT INTO lifecycle_events (at, type, instance_id, previous_unclean, gap_from) VALUES (?, ?, ?, ?, ?)`,
 		e.At.UnixNano(), e.Type, e.InstanceID, boolToInt(e.PreviousUnclean), gapFrom,
 	)
 	return err
 }
 
-func (s *SQLiteStorage) lifecycleEvents(tr TimeRange) ([]lifecycleEvent, error) {
+func (s *sqlStore) lifecycleEvents(tr TimeRange) ([]lifecycleEvent, error) {
 	start, end := int64(0), time.Now().Add(time.Hour).UnixNano()
 	if !tr.Start.IsZero() {
 		start = tr.Start.UnixNano()
@@ -162,7 +162,7 @@ func (s *SQLiteStorage) lifecycleEvents(tr TimeRange) ([]lifecycleEvent, error) 
 	if !tr.End.IsZero() {
 		end = tr.End.UnixNano()
 	}
-	rows, err := s.db.Query(
+	rows, err := s.query(
 		`SELECT at, type, instance_id, previous_unclean, gap_from FROM lifecycle_events
 		 WHERE at BETWEEN ? AND ? ORDER BY at ASC`, start, end)
 	if err != nil {
@@ -180,8 +180,8 @@ func (s *SQLiteStorage) lifecycleEvents(tr TimeRange) ([]lifecycleEvent, error) 
 	return out, rows.Err()
 }
 
-func (s *SQLiteStorage) lastLifecycleEvent(instanceID string) (*lifecycleEvent, error) {
-	row := s.db.QueryRow(
+func (s *sqlStore) lastLifecycleEvent(instanceID string) (*lifecycleEvent, error) {
+	row := s.queryRow(
 		`SELECT at, type, instance_id, previous_unclean, gap_from FROM lifecycle_events
 		 WHERE instance_id = ? ORDER BY at DESC LIMIT 1`, instanceID)
 	e, err := scanLifecycleEvent(row)
@@ -194,10 +194,10 @@ func (s *SQLiteStorage) lastLifecycleEvent(instanceID string) (*lifecycleEvent, 
 	return &e, nil
 }
 
-func (s *SQLiteStorage) lastRequestAt() (time.Time, bool) {
+func (s *sqlStore) lastRequestAt() (time.Time, bool) {
 	s.sync()
 	var ts sql.NullInt64
-	if err := s.db.QueryRow(`SELECT MAX(timestamp) FROM requests`).Scan(&ts); err != nil || !ts.Valid {
+	if err := s.queryRow(`SELECT MAX(timestamp) FROM requests`).Scan(&ts); err != nil || !ts.Valid {
 		return time.Time{}, false
 	}
 	return time.Unix(0, ts.Int64), true

@@ -8,6 +8,18 @@ on:
 jobs:
   go:
     runs-on: ubuntu-latest
+    # PostgreSQL for the shared-storage backend's tests.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: pulse
+          POSTGRES_DB: pulse
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      PULSE_TEST_POSTGRES_DSN: postgres://postgres:pulse@localhost:5432/pulse?sslmode=disable
     steps:
       - uses: actions/checkout@v4
 

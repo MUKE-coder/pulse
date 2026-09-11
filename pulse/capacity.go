@@ -125,7 +125,7 @@ func storageHandler(p *Pulse) gin.HandlerFunc {
 		}
 		coverage, limiting, _ := retentionCoverage(p, now)
 		resp := gin.H{
-			"driver":             storageDriverName(p.config.Storage.Driver),
+			"driver":             p.storageName(),
 			"retention_hours":    p.config.Storage.RetentionHours,
 			"retention_coverage": coverage,
 			"kinds":              kinds,
@@ -244,7 +244,7 @@ func sliceCapacity(st capacityStat, oldest, now time.Time) capacityStat {
 
 // --- SQLiteStorage ---
 
-func (s *SQLiteStorage) capacityStats(now time.Time) []capacityStat {
+func (s *sqlStore) capacityStats(now time.Time) []capacityStat {
 	depth, dropped, failed := s.writeQueueStats()
 	out := []capacityStat{{
 		Kind:     "write_queue",

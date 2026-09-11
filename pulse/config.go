@@ -39,6 +39,12 @@ const (
 	// See StorageConfig.DSN for the database path. The schema is created
 	// automatically on first open.
 	SQLite
+
+	// Postgres is the shared storage backend: several instances of an
+	// application can write to one PostgreSQL database, and every instance's
+	// dashboard shows them all. The application must import a PostgreSQL
+	// database/sql driver; see [WithPostgres].
+	Postgres
 )
 
 // Config holds all configuration for Pulse.
@@ -169,10 +175,15 @@ type DashboardConfig struct {
 type StorageConfig struct {
 	// Driver selects the storage backend (default: Memory).
 	Driver StorageDriver
-	// DSN is the SQLite database file path (default: "pulse.db"). Only used
-	// when Driver is SQLite. Pass ":memory:" for an ephemeral SQLite
-	// database — useful in tests.
+	// DSN is the SQLite database file path (default: "pulse.db"), or the
+	// PostgreSQL connection string when Driver is Postgres. Pass ":memory:"
+	// for an ephemeral SQLite database — useful in tests.
 	DSN string
+	// Schema is the PostgreSQL schema Pulse's tables go in (default:
+	// "pulse"). Only used when Driver is Postgres.
+	Schema string
+	// Backend, when set, is used instead of Driver; see [WithStorage].
+	Backend Storage `json:"-"`
 	// RetentionHours sets data retention period (default: 24).
 	// A background sweeper drops records older than this from both
 	// backends.
@@ -479,7 +490,7 @@ func applyDefaults(cfg Config) Config {
 	// we only touch the filesystem / RNG when a key is actually required.
 
 	// Storage
-	if cfg.Storage.DSN == "" {
+	if cfg.Storage.DSN == "" && cfg.Storage.Driver == SQLite {
 		cfg.Storage.DSN = defaults.Storage.DSN
 	}
 	if cfg.Storage.RetentionHours == 0 {
