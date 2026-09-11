@@ -1,7 +1,16 @@
 import { useState, useEffect } from 'react'
+import { Link } from 'react-router-dom'
 import { useAPI } from '../hooks/useAPI'
 import StatCard from '../components/StatCard'
 import DataTable from '../components/DataTable'
+
+// traceLink links a query to the log lines of the request that ran it.
+const traceLink = (v) => v ? (
+  <Link to={`/pulse/ui/logs?trace_id=${v}`} title="Log lines from this request"
+    style={{ color: '#818cf8', fontSize: 11, fontFamily: "'SF Mono', monospace" }}>
+    {v.substring(0, 12)}…
+  </Link>
+) : null
 
 export default function DatabasePage() {
   const { get } = useAPI()
@@ -55,6 +64,7 @@ export default function DatabasePage() {
         fontFamily: "'SF Mono', 'Fira Code', monospace",
       }}>{v}</span>
     )},
+    { key: 'request_trace_id', label: 'Request', render: traceLink },
   ]
 
   const patternCols = [
@@ -75,9 +85,7 @@ export default function DatabasePage() {
     { key: 'count', label: 'Repetitions', render: (v) => (
       <span style={{ color: '#ef4444', fontWeight: 700 }}>{v}x</span>
     )},
-    { key: 'request_trace_id', label: 'Trace ID', render: (v) => (
-      <span style={{ color: '#64748b', fontSize: 11 }}>{v?.substring(0, 12)}...</span>
-    )},
+    { key: 'request_trace_id', label: 'Trace ID', render: traceLink },
   ]
 
   const tabs = [

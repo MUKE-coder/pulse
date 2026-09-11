@@ -115,6 +115,9 @@ func Mount(ctx context.Context, router *gin.Engine, db *gorm.DB, opts ...Option)
 	// Deliver telemetry to any configured exporters (OpenTelemetry etc.).
 	startExportPipeline(p)
 
+	// Batch captured log lines for dashboards tailing them live.
+	startLogTail(p)
+
 	// Start retention sweeper (drops error/alert/N+1 records older than
 	// Storage.RetentionHours). Ring buffers self-trim, so this is only
 	// useful for the unbounded maps in MemoryStorage.

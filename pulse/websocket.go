@@ -20,6 +20,9 @@ const (
 	WSTypeHealth   = "health"
 	WSTypeAlert    = "alert"
 	WSTypeRuntime  = "runtime"
+	// WSTypeLogs carries batches of captured log lines. Unlike the other
+	// channels, it reaches only clients that subscribe to it by name.
+	WSTypeLogs = "logs"
 )
 
 // WSMessage is the envelope for all WebSocket messages.
@@ -186,6 +189,36 @@ func (h *WebSocketHub) Broadcast(msgType string, payload interface{}) {
 					h.unregister <- c
 				}(client)
 			}
+		}
+	}
+	h.mu.RUnlock()
+}
+
+// broadcastSubscribed sends a message only to clients that subscribed to
+// msgType by name — for high-volume channels that clients subscribed to
+// everything by default shouldn't receive.
+func (h *WebSocketHub) broadcastSubscribed(msgType string, payload interface{}) {
+	if h == nil {
+		return
+	}
+	data, err := json.Marshal(WSMessage{Type: msgType, Payload: payload, Timestamp: time.Now()})
+	if err != nil {
+		return
+	}
+	h.mu.RLock()
+	for client := range h.clients {
+		client.mu.RLock()
+		want := client.channels[msgType]
+		client.mu.RUnlock()
+		if !want {
+			continue
+		}
+		select {
+		case client.send <- data:
+		default:
+			go func(c *Client) {
+				h.unregister <- c
+			}(client)
 		}
 	}
 	h.mu.RUnlock()

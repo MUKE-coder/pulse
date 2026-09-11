@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -85,6 +86,10 @@ type Config struct {
 
 	// Profiling configures the optional CPU-profile / flame-graph endpoint.
 	Profiling ProfilingConfig
+
+	// Logs configures log capture through [Pulse.SlogHandler] and
+	// [Pulse.LogWriter].
+	Logs LogConfig
 
 	// DevMode enables verbose logging and more frequent aggregation.
 	DevMode bool
@@ -187,6 +192,19 @@ type MemoryCapacity struct {
 	// Runtime defaults to enough samples to cover RetentionHours at
 	// Runtime.SampleInterval (at least 10,000).
 	Runtime int
+	// Logs holds captured log lines (default 50,000). The buffer is
+	// allocated when the first line is captured.
+	Logs int
+}
+
+// LogConfig configures log capture. Nothing is captured until the
+// application sends its logs through [Pulse.SlogHandler] or
+// [Pulse.LogWriter].
+type LogConfig struct {
+	// MinLevel is the lowest level captured (default: slog.LevelInfo). The
+	// handler or writer wrapped by SlogHandler or LogWriter still receives
+	// every line its own settings allow.
+	MinLevel slog.Level
 }
 
 // TracingConfig configures request tracing.

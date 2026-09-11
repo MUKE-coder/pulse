@@ -35,6 +35,32 @@ only.
 - SQLite databases created by earlier versions gain the new columns when
   opened.
 
+### Added — log capture
+
+- `p.SlogHandler(next)` (log/slog) and `p.LogWriter(w)` (the log package,
+  zap, zerolog, any line writer) copy application logs into Pulse and pass
+  them on unchanged. Lines logged with a request's context carry its trace
+  and span IDs; `LogWriter` parses JSON lines and reads a `trace_id` field.
+- Captured lines are redacted by the same rules as request bodies:
+  sensitive attribute names and secret-looking values.
+- An error's detail shows the lines its request logged or, when none match,
+  the lines logged within 30 s of it (`GET /pulse/api/errors/:id/logs`).
+- A Logs page with search, level and trace filters and a live tail
+  (`GET /pulse/api/logs`, and the WebSocket channel `logs`, which reaches
+  only clients that subscribe to it by name). Trace IDs on the Database
+  page link to their request's lines.
+- `Config.Logs.MinLevel` / `WithLogMinLevel` (default Info) and
+  `MemoryCapacity.Logs` (default 50,000, allocated on first use). SQLite
+  keeps logs for `RetentionHours`. Exporters receive lines as `EventLog`
+  events.
+
+### Fixed — dashboard live updates
+
+- Pages reconnected their WebSocket after every message, because each
+  render passed a new channel list.
+- When the server packed several queued messages into one frame, the
+  dashboard dropped them all: it parsed the frame as a single JSON value.
+
 ---
 
 ## [1.1.0] — Unreleased

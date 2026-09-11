@@ -182,6 +182,9 @@ func (s *MemoryStorage) capacityStats(now time.Time) []capacityStat {
 		ringCapacity("dependencies", s.dependencies, now, func(m DependencyMetric) time.Time { return m.Timestamp }),
 		ringCapacity("runtime", s.runtimeStats, now, func(m RuntimeMetric) time.Time { return m.Timestamp }),
 	}
+	if rb := s.logBuffer(false); rb != nil {
+		out = append(out, ringCapacity("logs", rb, now, func(r LogRecord) time.Time { return r.Time }))
+	}
 
 	s.errorsMu.RLock()
 	out = append(out, capacityStat{Kind: "errors", Stored: int64(len(s.errors))})

@@ -1,14 +1,25 @@
 import { useState, useEffect } from 'react'
+import { Link } from 'react-router-dom'
 import { useAPI } from '../hooks/useAPI'
 import DataTable from '../components/DataTable'
 import StatusBadge from '../components/StatusBadge'
 import Modal from '../components/Modal'
+import LogLines from '../components/LogLines'
+
+// logsNote explains which lines an error's Logs section shows.
+function logsNote(r) {
+  if (!r) return 'Loading…'
+  if (r.match === 'trace') return 'Lines logged by the request behind the latest occurrence.'
+  if (r.match === 'time') return "No lines carry this request's trace; showing lines logged within 30s of the latest occurrence."
+  return r.capturing ? 'No lines were logged around this error.' : 'Log capture is off. The Logs page shows how to turn it on.'
+}
 
 export default function ErrorsPage() {
   const { get, post, del } = useAPI()
   const [errors, setErrors] = useState([])
   const [filter, setFilter] = useState({ type: '', resolved: '', muted: '' })
   const [selected, setSelected] = useState(null)
+  const [selectedLogs, setSelectedLogs] = useState(null)
   const [loading, setLoading] = useState(true)
 
   const fetchErrors = async () => {
@@ -26,9 +37,11 @@ export default function ErrorsPage() {
   useEffect(() => { fetchErrors() }, [filter])
 
   const fetchDetail = async (row) => {
+    setSelectedLogs(null)
     try {
-      const res = await get(`/errors/${row.id}`)
+      const [res, logsRes] = await Promise.all([get(`/errors/${row.id}`), get(`/errors/${row.id}/logs`)])
       if (res.ok) setSelected(await res.json())
+      if (logsRes.ok) setSelectedLogs(await logsRes.json())
     } catch {}
   }
 
@@ -137,6 +150,19 @@ export default function ErrorsPage() {
                 }}>{selected.stack_trace}</pre>
               </div>
             )}
+
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                <span style={{ color: '#64748b', fontSize: 12 }}>Logs</span>
+                {selected.trace_id && (
+                  <Link to={`/pulse/ui/logs?trace_id=${selected.trace_id}`} style={{ fontSize: 12, color: '#818cf8' }}>
+                    Open in Logs →
+                  </Link>
+                )}
+              </div>
+              <p style={{ color: '#64748b', fontSize: 12, margin: '4px 0 6px' }}>{logsNote(selectedLogs)}</p>
+              <LogLines logs={selectedLogs?.logs} maxHeight={260} emptyText="" />
+            </div>
 
             <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
               {!selected.muted && (

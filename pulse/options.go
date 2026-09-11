@@ -1,6 +1,7 @@
 package pulse
 
 import (
+	"log/slog"
 	"regexp"
 	"time"
 )
@@ -33,8 +34,8 @@ func WithPrefix(prefix string) Option {
 }
 
 // WithExporter adds an [Exporter] that receives Pulse's telemetry as it is
-// recorded — every request, query, outbound call and error. Multiple calls
-// accumulate.
+// recorded — every request, query, outbound call, error and captured log
+// line. Multiple calls accumulate.
 func WithExporter(e Exporter) Option {
 	return func(c *Config) { c.Exporters = append(c.Exporters, e) }
 }
@@ -214,6 +215,14 @@ func WithRedactor(hook func(*RequestContext)) Option {
 // WithMaxBodySize sets the cap on captured request body size in bytes.
 func WithMaxBodySize(bytes int) Option {
 	return func(c *Config) { c.Errors.MaxBodySize = bytes }
+}
+
+// --- Logs ---
+
+// WithLogMinLevel sets the lowest level of log line captured by
+// [Pulse.SlogHandler] and [Pulse.LogWriter] (default: Info).
+func WithLogMinLevel(l slog.Level) Option {
+	return func(c *Config) { c.Logs.MinLevel = l }
 }
 
 // --- Health ---

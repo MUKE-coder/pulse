@@ -13,7 +13,8 @@ import (
 // warehouse. Register one with [WithExporter].
 //
 // Every request is exported, whatever Tracing.SampleRate says; queries,
-// outbound calls and errors are exported as they are recorded. Values have
+// outbound calls, errors and captured log lines are exported as they are
+// recorded. Values have
 // already been redacted. Records carry trace and span IDs (TraceID, SpanID,
 // ParentSpanID), so an exporter can rebuild each request's span tree.
 //
@@ -34,6 +35,7 @@ const (
 	EventQuery      EventKind = "query"      // Event.Query is set
 	EventDependency EventKind = "dependency" // Event.Dependency is set
 	EventError      EventKind = "error"      // Event.Error is set
+	EventLog        EventKind = "log"        // Event.Log is set
 )
 
 // Event is one piece of telemetry handed to an [Exporter]. Exactly one of
@@ -45,6 +47,7 @@ type Event struct {
 	Query      *QueryMetric
 	Dependency *DependencyMetric
 	Error      *ErrorRecord
+	Log        *LogRecord
 }
 
 const (
@@ -86,7 +89,12 @@ func (p *Pulse) export(e Event) {
 	select {
 	case p.exporter.queue <- e:
 	default:
-		p.internalError("export", errExportQueueFull)
+		if e.Kind == EventLog {
+			// Not logged: the log line would be captured and exported in turn.
+			p.internal.count("export", errExportQueueFull)
+		} else {
+			p.internalError("export", errExportQueueFull)
+		}
 	}
 }
 

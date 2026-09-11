@@ -23,6 +23,7 @@ Pulse gives you full visibility into your application's HTTP requests, database 
   - [Health Checks](#health-checks)
   - [Alerting](#alerting)
   - [Prometheus](#prometheus)
+  - [Log capture](#log-capture)
   - [OpenTelemetry and exporters](#opentelemetry-and-exporters)
 - [Dependency Monitoring](#dependency-monitoring)
 - [WebSocket Live Updates](#websocket-live-updates)
@@ -682,9 +683,34 @@ Prometheus: pulse.PrometheusConfig{
 | `pulse_internal_errors_total` | counter | component | Failures inside Pulse itself (storage, notifications, …) |
 | `pulse_build_info` | gauge | version, instance_id, storage | Always 1; identifies the Pulse instance |
 
+### Log capture
+
+Send your application's logs through Pulse, and each error's detail shows the lines its request logged. The **Logs** page searches them and tails them live.
+
+```go
+p := pulse.Mount(ctx, router, db)
+
+// log/slog: wrap the handler you already use.
+slog.SetDefault(slog.New(p.SlogHandler(slog.NewJSONHandler(os.Stdout, nil))))
+
+// The log package, zap, zerolog, or anything else that writes lines:
+log.SetOutput(p.LogWriter(os.Stderr))
+```
+
+Lines logged with a request's context, `slog.InfoContext(c.Request.Context(), …)` or `slog.InfoContext(c, …)`, carry that request's trace and span IDs; that is how an error finds its lines. A line written to `LogWriter` is tied to a request when it has a `trace_id` field (log `pulse.TraceIDFromContext(ctx)`). JSON lines from zap and zerolog are parsed into level, message, time and attributes. When no line matches an error's request, its detail shows the lines logged within 30 seconds of it.
+
+Your handler or writer still receives every line unchanged. What Pulse stores is redacted by the same rules as request bodies: values of sensitive attributes (`password`, `token`, …) and secret-looking values (card numbers, JWTs, keys) are replaced.
+
+```go
+pulse.WithLogMinLevel(slog.LevelDebug)                        // capture Debug too (default: Info)
+pulse.WithMemoryCapacity(pulse.MemoryCapacity{Logs: 200_000}) // lines the Memory backend keeps (default 50,000)
+```
+
+With SQLite, logs are kept for `RetentionHours`, like everything else.
+
 ### OpenTelemetry and exporters
 
-An `Exporter` receives everything Pulse records: every request (whatever `SampleRate` says), query, outbound call and error. Records arrive in batches, already redacted, off the request path:
+An `Exporter` receives everything Pulse records: every request (whatever `SampleRate` says), query, outbound call, error and captured log line. Records arrive in batches, already redacted, off the request path:
 
 ```go
 type Exporter interface {
@@ -864,6 +890,13 @@ All endpoints under `/pulse/api/` require JWT authentication (except login).
 | `POST` | `/pulse/api/errors/:id/mute` | | Mute an error |
 | `POST` | `/pulse/api/errors/:id/resolve` | | Resolve an error |
 | `DELETE` | `/pulse/api/errors/:id` | | Delete an error |
+| `GET` | `/pulse/api/errors/:id/logs` | | Log lines from the request behind the latest occurrence (`match: "trace"`), or from within 30s of it (`match: "time"`) |
+
+### Logs
+
+| Method | Endpoint | Query Params | Description |
+|--------|----------|--------------|-------------|
+| `GET` | `/pulse/api/logs` | `?range=1h&trace_id=…&level=warn&q=timeout&limit=200` | Captured log lines, oldest first. `level` is the lowest level shown; `q` searches messages. With `trace_id` and no `range`, the whole trace is returned whenever it happened |
 
 ### Runtime
 

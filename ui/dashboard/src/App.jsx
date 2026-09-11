@@ -6,6 +6,7 @@ import Dashboard from './pages/Dashboard'
 import RoutesPage from './pages/Routes'
 import DatabasePage from './pages/Database'
 import ErrorsPage from './pages/Errors'
+import LogsPage from './pages/Logs'
 import RuntimePage from './pages/Runtime'
 import HealthPage from './pages/Health'
 import AlertsPage from './pages/Alerts'
@@ -30,6 +31,7 @@ export default function App() {
         <Route path="routes" element={<RoutesPage />} />
         <Route path="database" element={<DatabasePage />} />
         <Route path="errors" element={<ErrorsPage />} />
+        <Route path="logs" element={<LogsPage />} />
         <Route path="runtime" element={<RuntimePage />} />
         <Route path="health" element={<HealthPage />} />
         <Route path="alerts" element={<AlertsPage />} />

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -50,6 +51,10 @@ type MemoryStorage struct {
 	lifecycle   []lifecycleEvent
 	lifecycleMu sync.Mutex
 
+	// Captured log lines, allocated on first use; see logs.go.
+	logs        atomic.Pointer[RingBuffer[LogRecord]]
+	logCapacity int
+
 	// Config
 	appName   string
 	startTime time.Time
@@ -86,6 +91,7 @@ func newMemoryStorage(appName string, c MemoryCapacity) *MemoryStorage {
 		healthResults: make(map[string]*RingBuffer[HealthCheckResult]),
 		alerts:        make([]AlertRecord, 0),
 		n1Detections:  make([]N1Detection, 0),
+		logCapacity:   size(c.Logs, defaultLogCapacity),
 		appName:       appName,
 		startTime:     time.Now(),
 	}
@@ -860,6 +866,9 @@ func (s *MemoryStorage) Reset() error {
 	s.queries.Reset()
 	s.runtimeStats.Reset()
 	s.dependencies.Reset()
+	if rb := s.logBuffer(false); rb != nil {
+		rb.Reset()
+	}
 
 	s.errorsMu.Lock()
 	s.errors = make(map[string]*ErrorRecord)

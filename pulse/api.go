@@ -141,6 +141,10 @@ func registerAPIRoutes(router *gin.Engine, p *Pulse) {
 	protected.POST("/errors/:id/mute", errorMuteHandler(p))
 	protected.POST("/errors/:id/resolve", errorResolveHandler(p))
 	protected.DELETE("/errors/:id", errorDeleteHandler(p))
+	protected.GET("/errors/:id/logs", errorLogsHandler(p))
+
+	// Logs
+	protected.GET("/logs", logsHandler(p))
 
 	// Runtime
 	protected.GET("/runtime/current", runtimeCurrentHandler(p))

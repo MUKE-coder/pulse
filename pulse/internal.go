@@ -50,12 +50,7 @@ func (p *Pulse) internalError(component string, err error) {
 func (ie *internalErrors) record(component string, err error, now time.Time, always bool) (log bool, skipped int64) {
 	ie.mu.Lock()
 	defer ie.mu.Unlock()
-	if ie.counts == nil {
-		ie.counts = make(map[string]int64)
-		ie.last = make(map[string]string)
-		ie.logged = make(map[string]time.Time)
-		ie.skipped = make(map[string]int64)
-	}
+	ie.initLocked()
 	ie.counts[component]++
 	ie.last[component] = err.Error()
 	if always || now.Sub(ie.logged[component]) >= internalErrorLogInterval {
@@ -66,6 +61,29 @@ func (ie *internalErrors) record(component string, err error, now time.Time, alw
 	}
 	ie.skipped[component]++
 	return false, 0
+}
+
+// count records err (if non-nil) against component without logging it. It
+// is for the log-capture path, where a log line about the failure would be
+// fed back into capture.
+func (ie *internalErrors) count(component string, err error) {
+	if err == nil {
+		return
+	}
+	ie.mu.Lock()
+	defer ie.mu.Unlock()
+	ie.initLocked()
+	ie.counts[component]++
+	ie.last[component] = err.Error()
+}
+
+func (ie *internalErrors) initLocked() {
+	if ie.counts == nil {
+		ie.counts = make(map[string]int64)
+		ie.last = make(map[string]string)
+		ie.logged = make(map[string]time.Time)
+		ie.skipped = make(map[string]int64)
+	}
 }
 
 // snapshot returns the error count per component.

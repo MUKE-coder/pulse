@@ -6,6 +6,7 @@ const nav = [
   { to: '/pulse/ui/routes', label: 'Routes', icon: '◇' },
   { to: '/pulse/ui/database', label: 'Database', icon: '⊞' },
   { to: '/pulse/ui/errors', label: 'Errors', icon: '⊘' },
+  { to: '/pulse/ui/logs', label: 'Logs', icon: '≡' },
   { to: '/pulse/ui/runtime', label: 'Runtime', icon: '◎' },
   { to: '/pulse/ui/health', label: 'Health', icon: '♡' },
   { to: '/pulse/ui/alerts', label: 'Alerts', icon: '⚠' },

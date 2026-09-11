@@ -412,6 +412,18 @@ CREATE TABLE IF NOT EXISTS lifecycle_events (
 );
 CREATE INDEX IF NOT EXISTS idx_lifecycle_instance_at ON lifecycle_events (instance_id, at);
 
+CREATE TABLE IF NOT EXISTS logs (
+    timestamp   INTEGER NOT NULL,
+    level       INTEGER NOT NULL,
+    message     TEXT NOT NULL,
+    attrs       TEXT NOT NULL DEFAULT '',
+    trace_id    TEXT NOT NULL DEFAULT '',
+    span_id     TEXT NOT NULL DEFAULT '',
+    instance_id TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_logs_ts    ON logs (timestamp);
+CREATE INDEX IF NOT EXISTS idx_logs_trace ON logs (trace_id, timestamp);
+
 CREATE TABLE IF NOT EXISTS slo_rollups (
 	minute INTEGER NOT NULL,
 	slo    TEXT    NOT NULL,
@@ -1379,6 +1391,7 @@ func (s *SQLiteStorage) Cleanup(retention time.Duration) error {
 		{"alerts", "fired_at"},
 		{"errors", "last_seen"},
 		{"lifecycle_events", "at"},
+		{"logs", "timestamp"},
 	}
 	for _, d := range deletes {
 		if _, err := s.db.Exec(
@@ -1404,7 +1417,7 @@ func (s *SQLiteStorage) Reset() error {
 
 	tables := []string{"requests", "queries", "runtime_samples", "errors",
 		"health_results", "alerts", "dependencies", "n1_detections", "test_runs",
-		"request_rollups", "latency_rollups", "slo_rollups"}
+		"request_rollups", "latency_rollups", "slo_rollups", "logs"}
 	for _, t := range tables {
 		if _, err := s.db.Exec(`DELETE FROM ` + t); err != nil {
 			return fmt.Errorf("pulse/sqlite reset %s: %w", t, err)

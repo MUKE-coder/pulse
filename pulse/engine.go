@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -46,6 +47,11 @@ type Pulse struct {
 	// exporter delivers telemetry to Config.Exporters; nil when there are
 	// none (see exporter.go).
 	exporter *exportPipeline
+
+	// logCapture is set once SlogHandler or LogWriter is in use; logTail
+	// batches captured lines for live dashboards (see logs.go).
+	logCapture atomic.Bool
+	logTail    logTail
 
 	// GORM plugin
 	gormPlugin *PulsePlugin
