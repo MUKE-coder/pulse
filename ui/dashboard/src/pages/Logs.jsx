@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useAPI } from '../hooks/useAPI'
 import { useWebSocket } from '../hooks/useWebSocket'
 import LogLines from '../components/LogLines'
@@ -102,6 +102,9 @@ export default function LogsPage() {
       {traceId && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12, fontSize: 13, color: '#94a3b8' }}>
           Showing one request's lines: <code style={{ color: '#e2e8f0' }}>{traceId}</code>
+          <Link to={`/pulse/ui/traces/${traceId}`} style={{ ...btn, padding: '2px 10px', fontSize: 12, textDecoration: 'none' }}>
+            Open trace
+          </Link>
           <button type="button" onClick={() => setParams({})} style={{ ...btn, padding: '2px 10px', fontSize: 12 }}>
             Show all
           </button>

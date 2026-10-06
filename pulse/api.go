@@ -149,6 +149,9 @@ func registerAPIRoutes(router *gin.Engine, p *Pulse) {
 	// Logs
 	protected.GET("/logs", logsHandler(p))
 
+	// One request, end to end
+	protected.GET("/traces/:id", traceHandler(p))
+
 	// Runtime
 	protected.GET("/runtime/current", runtimeCurrentHandler(p))
 	protected.GET("/runtime/history", runtimeHistoryHandler(p))

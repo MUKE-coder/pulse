@@ -113,6 +113,9 @@ func initPostgresSchema(ctx context.Context, db *sql.DB, d *sqlDialect) error {
 		stmts = append(stmts, d.sql(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s`,
 			c.table, c.column, postgresTypes.Replace(c.definition))))
 	}
+	for _, stmt := range sqlAddedIndexes {
+		stmts = append(stmts, d.sql(stmt))
+	}
 	for _, s := range stmts {
 		if _, err := tx.ExecContext(ctx, s); err != nil {
 			return fmt.Errorf("pulse/postgres: schema %q: %w", firstLine(s), err)

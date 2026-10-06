@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added — one request, end to end
+
+- A trace view: `GET /pulse/api/traces/:id` returns every span Pulse
+  recorded for a request — the request itself, each query it ran, each
+  call it made — with the lines logged inside it. The dashboard draws
+  them as a waterfall at `/pulse/ui/traces/:id`, where an N+1 shows up as
+  a staircase of identical queries and a slow dependency as the bar that
+  fills the request.
+- Trace IDs on the Database page, in an error's detail and on the Logs
+  page link straight to it.
+
+### Fixed
+
+- Outbound calls recorded their trace and span IDs in memory but the SQL
+  backends dropped them, so a call could not be tied back to its request.
+  The `dependencies` table now keeps them; existing databases gain the
+  columns when opened, and trace lookups are indexed on all three tables.
+
 ## [1.2.0] — 2026-10-06
 
 Span identity and exporters, log capture, PostgreSQL storage shared by

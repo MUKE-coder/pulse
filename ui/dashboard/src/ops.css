@@ -187,3 +187,20 @@
   .ops-panel, .ops-panel.w3, .ops-panel.w5, .ops-panel.w6, .ops-panel.w7, .ops-panel.w8 { grid-column: span 12; }
   .ops-stat .v { font-size: 24px; }
 }
+
+/* waterfall */
+.ops-wf { margin-top: 4px; }
+.ops-wf-row {
+  display: grid; grid-template-columns: minmax(180px, 2fr) 5fr 64px; gap: 12px;
+  align-items: center; padding: 5px 0; border-bottom: 1px solid var(--ops-line); font-size: 12.5px;
+}
+.ops-wf-row:last-child { border-bottom: 0; }
+.ops-wf-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ops-wf-detail { color: var(--ops-ink-3); margin-left: 8px; }
+.ops-wf-track { position: relative; height: 14px; background: var(--ops-surface-2); border-radius: 4px; }
+.ops-wf-bar { position: absolute; top: 2px; height: 10px; border-radius: 3px; min-width: 2px; }
+.ops-wf-dur { text-align: right; color: var(--ops-ink-2); }
+@media (max-width: 680px) {
+  .ops-wf-row { grid-template-columns: 1fr 48px; }
+  .ops-wf-track { grid-column: 1 / -1; }
+}

@@ -20,7 +20,8 @@ const nav = [
 export default function Layout() {
   const { logout, user } = useAuth()
   // The ops dashboard paints its own themed surface edge to edge.
-  const ops = useLocation().pathname.replace(/\/$/, '') === '/pulse/ui'
+  const path = useLocation().pathname.replace(/\/$/, '')
+  const ops = path === '/pulse/ui' || path.startsWith('/pulse/ui/traces/')
 
   return (
     <div style={{ display: 'flex', height: '100vh', background: '#0a0a12' }}>

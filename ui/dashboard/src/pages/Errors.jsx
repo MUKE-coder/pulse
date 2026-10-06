@@ -155,9 +155,14 @@ export default function ErrorsPage() {
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
                 <span style={{ color: '#64748b', fontSize: 12 }}>Logs</span>
                 {selected.trace_id && (
-                  <Link to={`/pulse/ui/logs?trace_id=${selected.trace_id}`} style={{ fontSize: 12, color: '#818cf8' }}>
-                    Open in Logs →
-                  </Link>
+                  <span style={{ display: 'flex', gap: 12 }}>
+                    <Link to={`/pulse/ui/traces/${selected.trace_id}`} style={{ fontSize: 12, color: '#818cf8' }}>
+                      Open trace →
+                    </Link>
+                    <Link to={`/pulse/ui/logs?trace_id=${selected.trace_id}`} style={{ fontSize: 12, color: '#818cf8' }}>
+                      Open in Logs →
+                    </Link>
+                  </span>
                 )}
               </div>
               <p style={{ color: '#64748b', fontSize: 12, margin: '4px 0 6px' }}>{logsNote(selectedLogs)}</p>

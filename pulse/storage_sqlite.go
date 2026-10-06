@@ -109,6 +109,10 @@ func openSQLiteStorage(dsn, appName string, queueSize int) (*SQLiteStorage, erro
 		_ = db.Close()
 		return nil, err
 	}
+	if err := createAddedIndexes(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 
 	return &SQLiteStorage{newSQLStore(db, sqliteDialect, appName, sqliteFilePath(dsn), queueSize, true)}, nil
 }
@@ -485,6 +489,9 @@ func initSQLiteSchema(db *sql.DB) error {
 // CREATE TABLE IF NOT EXISTS leaves an existing table alone, so databases
 // created by an earlier version get them through ALTER TABLE at open.
 var sqliteAddedColumns = []struct{ table, column, definition string }{
+	{"dependencies", "trace_id", "TEXT NOT NULL DEFAULT ''"},       // v1.2.1
+	{"dependencies", "span_id", "TEXT NOT NULL DEFAULT ''"},        // v1.2.1
+	{"dependencies", "parent_span_id", "TEXT NOT NULL DEFAULT ''"}, // v1.2.1
 	{"requests", "instance_id", "TEXT NOT NULL DEFAULT ''"},        // v1.2
 	{"runtime_samples", "instance_id", "TEXT NOT NULL DEFAULT ''"}, // v1.2
 	{"errors", "instance_id", "TEXT NOT NULL DEFAULT ''"},          // v1.2
@@ -573,6 +580,24 @@ func copyLegacyRollups(db *sql.DB) error {
 		}
 		if _, err := db.Exec(`DROP TABLE ` + old); err != nil {
 			return fmt.Errorf("pulse/sqlite: drop %s: %w", old, err)
+		}
+	}
+	return nil
+}
+
+// sqlAddedIndexes are indexes over columns added by migrateSQLiteColumns, so
+// they are created after it rather than with the schema. Looking a trace up
+// touches all three tables.
+var sqlAddedIndexes = []string{
+	`CREATE INDEX IF NOT EXISTS idx_requests_trace ON requests (trace_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_queries_trace ON queries (request_trace_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_dependencies_trace ON dependencies (trace_id)`,
+}
+
+func createAddedIndexes(db *sql.DB) error {
+	for _, stmt := range sqlAddedIndexes {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("pulse/sqlite: %q: %w", firstLine(stmt), err)
 		}
 	}
 	return nil
@@ -1263,10 +1288,10 @@ func (s *sqlStore) GetAlerts(f AlertFilter) ([]AlertRecord, error) {
 
 func (s *sqlStore) StoreDependencyMetric(m DependencyMetric) error {
 	return s.enqueue(
-		`INSERT INTO dependencies (timestamp, name, method, url, status_code, latency_ns, request_size, response_size, error)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO dependencies (timestamp, name, method, url, status_code, latency_ns, request_size, response_size, error, trace_id, span_id, parent_span_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.Timestamp.UnixNano(), m.Name, m.Method, m.URL, m.StatusCode,
-		int64(m.Latency), m.RequestSize, m.ResponseSize, m.Error,
+		int64(m.Latency), m.RequestSize, m.ResponseSize, m.Error, m.TraceID, m.SpanID, m.ParentSpanID,
 	)
 }
 

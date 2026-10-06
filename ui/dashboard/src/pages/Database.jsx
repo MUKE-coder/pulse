@@ -6,7 +6,7 @@ import DataTable from '../components/DataTable'
 
 // traceLink links a query to the log lines of the request that ran it.
 const traceLink = (v) => v ? (
-  <Link to={`/pulse/ui/logs?trace_id=${v}`} title="Log lines from this request"
+  <Link to={`/pulse/ui/traces/${v}`} title="This request, end to end"
     style={{ color: '#818cf8', fontSize: 11, fontFamily: "'SF Mono', monospace" }}>
     {v.substring(0, 12)}…
   </Link>
