@@ -729,7 +729,22 @@ With SQLite, logs are kept for `RetentionHours`, like everything else.
 
 ### OpenTelemetry and exporters
 
-An `Exporter` receives everything Pulse records: every request (whatever `SampleRate` says), query, outbound call, error and captured log line. Records arrive in batches, already redacted, off the request path:
+An `Exporter` receives everything Pulse records: every request (whatever `SampleRate` says), query, outbound call, error, captured log line and runtime sample.
+
+The `otel` submodule turns them into OpenTelemetry traces and metrics, configured by the standard environment variables (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME`):
+
+```go
+import pulseotel "github.com/MUKE-coder/pulse/otel"
+
+exp, err := pulseotel.NewOTLP(ctx, pulseotel.WithService("orders", "1.4.0"))
+if err != nil {
+    log.Fatal(err)
+}
+p := pulse.Mount(ctx, router, db, pulse.WithExporter(exp))
+defer exp.Shutdown(context.Background())
+```
+
+Requests become server spans with their queries and outbound calls as children, keeping the trace and span IDs Pulse put in `traceparent` headers, so they join traces from upstream and downstream services. Alongside them go `http.server.request.duration`, `http.client.request.duration`, `db.client.operation.duration`, `go.memory.used` and `go.goroutine.count`. Pass `pulseotel.WithoutMetrics()` for spans only. The core module imports no OpenTelemetry packages: only applications that use the submodule pull them in. Records arrive in batches, already redacted, off the request path:
 
 ```go
 type Exporter interface {

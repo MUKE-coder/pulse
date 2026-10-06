@@ -1,21 +1,27 @@
-// Package pulseotel sends Pulse's telemetry to OpenTelemetry as traces.
+// Package pulseotel sends Pulse's telemetry to OpenTelemetry as traces and
+// metrics, so an application already running Datadog, Honeycomb or Grafana
+// sees Pulse's data in the tools it has.
 //
-//	otlp, err := otlptracehttp.New(ctx)
+//	exp, err := pulseotel.NewOTLP(ctx, pulseotel.WithService("orders", "1.4.0"))
 //	if err != nil { ... }
-//	exp := pulseotel.New(
-//		sdktrace.WithBatcher(otlp),
-//		sdktrace.WithResource(resource.NewSchemaless(semconv.ServiceName("orders"))),
-//	)
 //	p := pulse.Mount(ctx, router, db, pulse.WithExporter(exp))
 //	...
 //	_ = p.Shutdown()                       // hands the last events to exp
 //	_ = exp.Shutdown(context.Background()) // flushes them to the collector
+//
+// [NewOTLP] reads the standard OTEL_EXPORTER_OTLP_* environment variables.
+// [New] and [NewWithMetrics] take providers you build yourself.
 //
 // Every request becomes a server span. Every GORM query and every call made
 // through [pulse.WrapHTTPClient] becomes a client span beneath it. Spans keep
 // Pulse's own trace and span IDs, the ones Pulse reads from and writes to
 // traceparent headers, so they join traces started by callers and continued
 // by downstream services.
+//
+// Metrics mirror the spans under their semantic-convention names —
+// http.server.request.duration, http.client.request.duration,
+// db.client.operation.duration — alongside go.memory.used and
+// go.goroutine.count from Pulse's runtime sampler.
 //
 // Pulse exports every request, whatever its sample rate for storage;
 // sampling for OpenTelemetry is up to the sampler passed to [New]. Requests
@@ -27,6 +33,8 @@ package pulseotel
 import (
 	"context"
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"math/rand/v2"
 	"net/url"
 	"strconv"
@@ -35,6 +43,7 @@ import (
 	"github.com/MUKE-coder/pulse/pulse"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.opentelemetry.io/otel/trace"
@@ -47,6 +56,9 @@ const instrumentationName = "github.com/MUKE-coder/pulse/otel"
 type Exporter struct {
 	tp     *sdktrace.TracerProvider
 	tracer trace.Tracer
+
+	mp *sdkmetric.MeterProvider // nil when only spans are exported
+	m  *metrics
 }
 
 // New returns an Exporter backed by a TracerProvider built from opts —
@@ -54,23 +66,62 @@ type Exporter struct {
 // [sdktrace.WithResource] naming the service. The provider's ID generator
 // is always Pulse's, so spans keep the IDs Pulse assigned them.
 func New(opts ...sdktrace.TracerProviderOption) *Exporter {
+	e, _ := newExporter(nil, opts...) // no meter provider, so no error
+	return e
+}
+
+// NewWithMetrics is [New] with metrics as well as spans, recorded with mp —
+// request, outbound-call and query durations, and the Go runtime samples.
+// For the usual setup, OTLP configured by the standard environment
+// variables, use [NewOTLP].
+func NewWithMetrics(mp *sdkmetric.MeterProvider, opts ...sdktrace.TracerProviderOption) (*Exporter, error) {
+	return newExporter(mp, opts...)
+}
+
+func newExporter(mp *sdkmetric.MeterProvider, opts ...sdktrace.TracerProviderOption) (*Exporter, error) {
 	opts = append(opts, sdktrace.WithIDGenerator(pulseIDs{}))
 	tp := sdktrace.NewTracerProvider(opts...)
-	return &Exporter{
+	e := &Exporter{
 		tp:     tp,
 		tracer: tp.Tracer(instrumentationName, trace.WithInstrumentationVersion(pulse.Version)),
+		mp:     mp,
 	}
+	if mp != nil {
+		m, err := newMetrics(mp)
+		if err != nil {
+			return nil, fmt.Errorf("pulseotel: metrics: %w", err)
+		}
+		e.m = m
+	}
+	return e, nil
 }
 
 // TracerProvider returns the provider the spans are recorded with.
 func (e *Exporter) TracerProvider() *sdktrace.TracerProvider { return e.tp }
 
-// ForceFlush exports any spans still buffered by the provider's processors.
-func (e *Exporter) ForceFlush(ctx context.Context) error { return e.tp.ForceFlush(ctx) }
+// MeterProvider returns the provider the metrics are recorded with, or nil
+// when the Exporter only records spans.
+func (e *Exporter) MeterProvider() *sdkmetric.MeterProvider { return e.mp }
 
-// Shutdown flushes buffered spans and shuts the provider down. Call it after
-// [pulse.Pulse.Shutdown], which hands the exporter its last events.
-func (e *Exporter) Shutdown(ctx context.Context) error { return e.tp.Shutdown(ctx) }
+// ForceFlush exports anything still buffered: spans, and metrics when they
+// are recorded.
+func (e *Exporter) ForceFlush(ctx context.Context) error {
+	err := e.tp.ForceFlush(ctx)
+	if e.mp != nil {
+		err = errors.Join(err, e.mp.ForceFlush(ctx))
+	}
+	return err
+}
+
+// Shutdown flushes what is buffered and shuts the providers down. Call it
+// after [pulse.Pulse.Shutdown], which hands the exporter its last events.
+func (e *Exporter) Shutdown(ctx context.Context) error {
+	err := e.tp.Shutdown(ctx)
+	if e.mp != nil {
+		err = errors.Join(err, e.mp.Shutdown(ctx))
+	}
+	return err
+}
 
 // Export implements [pulse.Exporter].
 func (e *Exporter) Export(ctx context.Context, events []pulse.Event) {
@@ -82,6 +133,8 @@ func (e *Exporter) Export(ctx context.Context, events []pulse.Event) {
 			e.query(ctx, ev.Query)
 		case ev.Kind == pulse.EventDependency && ev.Dependency != nil:
 			e.dependency(ctx, ev.Dependency)
+		case ev.Kind == pulse.EventRuntime && ev.Runtime != nil && e.m != nil:
+			e.m.runtime(ctx, ev.Runtime)
 		}
 		// Error records are covered by the request span's status and
 		// exception event.
@@ -89,6 +142,9 @@ func (e *Exporter) Export(ctx context.Context, events []pulse.Event) {
 }
 
 func (e *Exporter) request(ctx context.Context, m *pulse.RequestMetric) {
+	if e.m != nil {
+		e.m.request(ctx, m)
+	}
 	attrs := []attribute.KeyValue{
 		semconv.HTTPRequestMethodKey.String(m.Method),
 		semconv.HTTPRouteKey.String(m.Path),
@@ -127,6 +183,9 @@ func (e *Exporter) request(ctx context.Context, m *pulse.RequestMetric) {
 }
 
 func (e *Exporter) query(ctx context.Context, m *pulse.QueryMetric) {
+	if e.m != nil {
+		e.m.query(ctx, m)
+	}
 	attrs := []attribute.KeyValue{semconv.DBQueryTextKey.String(m.NormalizedSQL)}
 	if m.Operation != "" {
 		attrs = append(attrs, semconv.DBOperationNameKey.String(m.Operation))
@@ -158,6 +217,9 @@ func (e *Exporter) query(ctx context.Context, m *pulse.QueryMetric) {
 }
 
 func (e *Exporter) dependency(ctx context.Context, m *pulse.DependencyMetric) {
+	if e.m != nil {
+		e.m.dependency(ctx, m)
+	}
 	attrs := []attribute.KeyValue{
 		semconv.HTTPRequestMethodKey.String(m.Method),
 		semconv.URLFullKey.String(m.URL),

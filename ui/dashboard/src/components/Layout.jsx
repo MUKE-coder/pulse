@@ -1,4 +1,4 @@
-import { NavLink, Outlet } from 'react-router-dom'
+import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 
 const nav = [
@@ -19,6 +19,8 @@ const nav = [
 
 export default function Layout() {
   const { logout, user } = useAuth()
+  // The ops dashboard paints its own themed surface edge to edge.
+  const ops = useLocation().pathname.replace(/\/$/, '') === '/pulse/ui'
 
   return (
     <div style={{ display: 'flex', height: '100vh', background: '#0a0a12' }}>
@@ -84,7 +86,7 @@ export default function Layout() {
       </aside>
 
       {/* Main Content */}
-      <main style={{ flex: 1, overflow: 'auto', padding: 24 }}>
+      <main style={{ flex: 1, overflow: 'auto', padding: ops ? 0 : 24 }}>
         <Outlet />
       </main>
     </div>

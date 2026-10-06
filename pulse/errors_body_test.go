@@ -134,3 +134,103 @@ func TestErrorMiddleware_RedactsFormAndQuery(t *testing.T) {
 		t.Errorf("form body not redacted correctly: %q", rc.Body)
 	}
 }
+
+// countingBody counts reads, so the middleware can be held to reading
+// nothing ahead of the handler.
+type countingBody struct {
+	r     io.Reader
+	reads *int
+}
+
+func (c countingBody) Read(p []byte) (int, error) { *c.reads++; return c.r.Read(p) }
+func (countingBody) Close() error                 { return nil }
+
+// newUnreadBodyRouter mounts a handler that fails without reading the body.
+func newUnreadBodyRouter(t *testing.T) (*gin.Engine, *Pulse) {
+	t.Helper()
+	p := newPulse(context.Background(), applyDefaults(Config{Errors: ErrorConfig{MaxBodySize: 4096}}))
+	p.storage = NewMemoryStorage("test")
+	t.Cleanup(func() { p.Shutdown() })
+	router := gin.New()
+	router.Use(newErrorMiddleware(p))
+	router.POST("/submit", func(c *gin.Context) {
+		c.Error(errors.New("rejected before reading the body"))
+		c.Status(http.StatusInternalServerError)
+	})
+	return router, p
+}
+
+// TestErrorMiddleware_ReadsNothingBeforeTheHandler is the regression test for
+// the middleware reading every request body up front, whether or not the
+// request failed.
+func TestErrorMiddleware_ReadsNothingBeforeTheHandler(t *testing.T) {
+	p := newPulse(context.Background(), applyDefaults(Config{Errors: ErrorConfig{MaxBodySize: 4096}}))
+	p.storage = NewMemoryStorage("test")
+	t.Cleanup(func() { p.Shutdown() })
+
+	reads, readsAtHandler := 0, -1
+	var got []byte
+	router := gin.New()
+	router.Use(newErrorMiddleware(p))
+	router.POST("/submit", func(c *gin.Context) {
+		readsAtHandler = reads
+		got, _ = io.ReadAll(c.Request.Body)
+		c.Status(http.StatusOK)
+	})
+
+	payload := strings.Repeat("x", 10000)
+	req := httptest.NewRequest("POST", "/submit", nil)
+	req.Header.Set("Content-Type", "application/json")
+	req.Body = countingBody{r: strings.NewReader(payload), reads: &reads}
+	req.ContentLength = int64(len(payload))
+	router.ServeHTTP(httptest.NewRecorder(), req)
+
+	if readsAtHandler != 0 {
+		t.Errorf("the body was read %d times before the handler ran, want 0", readsAtHandler)
+	}
+	if string(got) != payload {
+		t.Errorf("handler received %d bytes, want all %d", len(got), len(payload))
+	}
+}
+
+// A request that fails before anything reads its body is still reported with
+// the body the client sent: it is read on the error path, not before.
+func TestErrorMiddleware_UnreadBodyIsCapturedOnError(t *testing.T) {
+	router, p := newUnreadBodyRouter(t)
+	postBody(router, "/submit", "application/json", `{"amount":42,"password":"hunter2"}`)
+
+	rc := waitForErrorRecord(t, p).RequestContext
+	if strings.Contains(rc.Body, "hunter2") {
+		t.Errorf("stored body leaks the password: %q", rc.Body)
+	}
+	if !strings.Contains(rc.Body, `"amount":42`) {
+		t.Errorf("stored body = %q, want the body the client sent", rc.Body)
+	}
+}
+
+// A body sent without a Content-Length — chunked, the way browsers send
+// FormData — is captured too; earlier versions skipped it.
+func TestErrorMiddleware_ChunkedBodyIsCaptured(t *testing.T) {
+	router, p, received := newBodyTestRouter(t, 4096)
+
+	payload := `{"username":"bob","password":"hunter2"}`
+	req := httptest.NewRequest("POST", "/submit", nil)
+	req.Header.Set("Content-Type", "application/json")
+	req.Body = io.NopCloser(strings.NewReader(payload))
+	req.ContentLength = -1
+	router.ServeHTTP(httptest.NewRecorder(), req)
+
+	if string(*received) != payload {
+		t.Fatalf("handler received %q, want the full body", *received)
+	}
+	rc := waitForErrorRecord(t, p).RequestContext
+	if strings.Contains(rc.Body, "hunter2") {
+		t.Errorf("stored body leaks the password: %q", rc.Body)
+	}
+	if !strings.Contains(rc.Body, `"username":"bob"`) {
+		t.Errorf("stored body = %q, want the redacted JSON", rc.Body)
+	}
+	if rc.BodyTruncated {
+		t.Error("a complete chunked body should not be marked truncated")
+	}
+}

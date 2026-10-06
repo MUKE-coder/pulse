@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -26,16 +27,38 @@ const (
 
 // capturedBody is what the error middleware kept of a request body.
 type capturedBody struct {
-	data    []byte // first ≤ MaxBodySize bytes; nil when omitted
-	size    int64  // the request's Content-Length
-	omitted bool   // content type Pulse cannot redact — record the size only
+	rec     *bodyRecorder // records what the handler reads; nil when nothing is kept
+	size    int64         // the request's Content-Length, negative when chunked
+	omitted bool          // content type Pulse cannot redact — record the size only
 }
 
-// captureBody buffers up to maxSize bytes of req's body for later capture,
-// then re-attaches a reader that replays those bytes followed by the unread
-// remainder, so handlers always receive the complete body.
+// data returns up to MaxBodySize bytes of the body. It is called only when a
+// request has failed, so it reads whatever the handler left unread — a
+// handler that rejected the request before touching the body still gets its
+// error reported with the body the client sent.
+func (b capturedBody) data() []byte {
+	if b.rec == nil {
+		return nil
+	}
+	b.rec.fill()
+	return b.rec.captured()
+}
+
+// truncated reports whether the kept bytes are less than the request carried.
+func (b capturedBody) truncated(read int) bool {
+	if b.size < 0 { // chunked: all that is known is whether the cap was reached
+		return b.rec != nil && read >= b.rec.max
+	}
+	return int64(read) < b.size
+}
+
+// captureBody wraps req's body so that the first maxSize bytes the handler
+// reads are kept, in case the request ends in an error. Nothing is read,
+// buffered or copied ahead of the handler: the handler receives the body
+// exactly as the client sent it, and a request that neither fails nor reads
+// its body costs one small wrapper.
 //
-// Bodies of content types the redactor does not understand are never read;
+// Bodies of content types the redactor does not understand are never kept;
 // they are recorded as a size marker instead.
 func captureBody(req *http.Request, maxSize int) capturedBody {
 	body := capturedBody{size: req.ContentLength}
@@ -43,21 +66,53 @@ func captureBody(req *http.Request, maxSize int) capturedBody {
 		body.omitted = true
 		return body
 	}
-	limit := req.ContentLength
-	if maxSize > 0 && limit > int64(maxSize) {
-		limit = int64(maxSize)
+	if maxSize <= 0 {
+		return body
 	}
-	orig := req.Body
-	body.data, _ = io.ReadAll(io.LimitReader(orig, limit))
-	req.Body = replayBody{Reader: io.MultiReader(bytes.NewReader(body.data), orig), Closer: orig}
+	body.rec = &bodyRecorder{ReadCloser: req.Body, max: maxSize}
+	req.Body = body.rec
 	return body
 }
 
-// replayBody is a request body that yields buffered bytes before the rest of
-// the original stream, and closes the original.
-type replayBody struct {
-	io.Reader
-	io.Closer
+// bodyRecorder is a request body that keeps the first max bytes read through
+// it. Reads pass straight through, so the handler sees the whole body.
+type bodyRecorder struct {
+	io.ReadCloser
+	max int
+
+	mu   sync.Mutex // a handler may read the body from another goroutine
+	seen []byte
+}
+
+func (b *bodyRecorder) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if n > 0 {
+		b.mu.Lock()
+		if room := b.max - len(b.seen); room > 0 {
+			b.seen = append(b.seen, p[:min(n, room)]...)
+		}
+		b.mu.Unlock()
+	}
+	return n, err
+}
+
+// fill reads what the handler left unread, up to max. The bytes kept stay a
+// contiguous prefix of the body, since reading continues where the handler
+// stopped.
+func (b *bodyRecorder) fill() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if room := b.max - len(b.seen); room > 0 {
+		rest, _ := io.ReadAll(io.LimitReader(b.ReadCloser, int64(room)))
+		b.seen = append(b.seen, rest...)
+	}
+}
+
+// captured returns the bytes kept so far.
+func (b *bodyRecorder) captured() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return bytes.Clone(b.seen)
 }
 
 // newErrorMiddleware creates a Gin middleware that recovers from panics, captures
@@ -66,9 +121,11 @@ func newErrorMiddleware(p *Pulse) gin.HandlerFunc {
 	cfg := p.config.Errors
 
 	return func(c *gin.Context) {
-		// Capture request body early if configured (before it's consumed by handlers)
+		// Wrap the request body, so an error can report what the request
+		// carried. Nothing is read until the handler reads it; a body sent
+		// without a Content-Length (chunked) is kept too.
 		var body capturedBody
-		if boolValue(cfg.CaptureRequestBody) && c.Request.Body != nil && c.Request.ContentLength > 0 {
+		if boolValue(cfg.CaptureRequestBody) && c.Request.Body != nil && c.Request.ContentLength != 0 {
 			body = captureBody(c.Request, cfg.MaxBodySize)
 		}
 
@@ -321,12 +378,15 @@ func captureRequestContext(c *gin.Context, body capturedBody, r *redactor) *Requ
 		ContentType: c.ContentType(),
 	}
 
+	data := body.data()
 	switch {
 	case body.omitted:
 		reqCtx.Body = omittedBodyMarker(body.size, reqCtx.ContentType)
-	case len(body.data) > 0:
-		reqCtx.Body = string(r.body(reqCtx.ContentType, body.data))
-		reqCtx.BodyTruncated = int64(len(body.data)) < body.size
+	case len(data) > 0:
+		reqCtx.Body = string(r.body(reqCtx.ContentType, data))
+		reqCtx.BodyTruncated = body.truncated(len(data))
+	case body.rec != nil:
+		reqCtx.Body = unreadBodyMarker(body.size, reqCtx.ContentType)
 	}
 
 	return reqCtx

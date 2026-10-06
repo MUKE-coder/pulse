@@ -262,6 +262,19 @@ func (r *redactor) body(contentType string, body []byte) []byte {
 	return []byte(omittedBodyMarker(int64(len(body)), contentType))
 }
 
+// unreadBodyMarker describes a body the handler never read: Pulse keeps only
+// what the handler itself consumed, so there is nothing to show.
+func unreadBodyMarker(size int64, contentType string) string {
+	ct := mediaType(contentType)
+	if ct == "" {
+		ct = "unknown content type"
+	}
+	if size < 0 {
+		return fmt.Sprintf("[body not read by the handler: %s]", ct)
+	}
+	return fmt.Sprintf("[body not read by the handler: %d bytes of %s]", size, ct)
+}
+
 // omittedBodyMarker is stored in place of a body Pulse cannot redact.
 func omittedBodyMarker(size int64, contentType string) string {
 	ct := mediaType(contentType)

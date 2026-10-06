@@ -135,6 +135,9 @@ func registerAPIRoutes(router *gin.Engine, p *Pulse) {
 	protected.GET("/database/n1/ranked", dbN1RankedHandler(p))
 	protected.GET("/database/pool", dbPoolHandler(p))
 
+	// Outbound dependencies
+	protected.GET("/dependencies", dependenciesHandler(p))
+
 	// Errors
 	protected.GET("/errors", errorsListHandler(p))
 	protected.GET("/errors/:id", errorDetailHandler(p))
@@ -449,6 +452,18 @@ func dbPoolHandler(p *Pulse) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, pool)
+	}
+}
+
+// dependenciesHandler serves GET /pulse/api/dependencies: per-dependency call
+// volume, error rate, availability and latency over the range.
+func dependenciesHandler(p *Pulse) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		stats, _ := p.storage.GetDependencyStats(parseTimeRangeParam(c))
+		if stats == nil {
+			stats = []DependencyStats{}
+		}
+		c.JSON(http.StatusOK, stats)
 	}
 }
 

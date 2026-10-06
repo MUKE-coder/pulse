@@ -12,6 +12,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 In progress: the v1.2 part of the follow-up plan. API changes are additive
 only.
 
+### Changed — the dashboard's Overview is now an ops view
+
+- The Overview is rebuilt around the subsystems a request passes through:
+  a request-path map (clients → this application → its database and the
+  services it calls, each with its own traffic and health), golden-signal
+  tiles with sparklines, and a section per subsystem — API, Database,
+  Outbound dependencies, Alerts and logs — each with a status pill and
+  dense panels: request rate, errors, saturation meters, slowest
+  endpoints, slowest queries, N+1 detections, dependency availability,
+  storage headroom, firing alerts and a live tail of warnings and errors.
+- It follows the system's light or dark setting, with a toggle in the
+  header that is remembered, alongside a time range (15m/1h/6h/24h) and a
+  pause control. Colours come from one set of design tokens.
+- `GET /pulse/api/dependencies` serves the per-service outbound call
+  stats the dashboard shows.
+- The other pages are unchanged.
+
+### Fixed — request bodies (#6)
+
+- The error middleware no longer reads the request body before the handler
+  does. It wraps the body and keeps the first `MaxBodySize` bytes as the
+  handler reads them, so a request that neither fails nor reads its body
+  costs nothing; when a request does fail, whatever the handler left unread
+  is read then, so error context is unchanged. A handler that rejects a
+  request before touching the body still gets the body reported.
+- Bodies sent without a `Content-Length` (chunked, as browsers send
+  `FormData`) are captured too; earlier versions skipped them.
+- The truncation this issue reported — handlers receiving only the first
+  4096 bytes — was fixed in v1.0.1, which was never tagged. v1.0.0 is the
+  only release that carries it.
+
+### Added — OpenTelemetry metrics and OTLP (#5)
+
+- `pulseotel.NewOTLP(ctx, …)` builds the whole pipeline from the standard
+  `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`,
+  `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` variables, so sending
+  Pulse's telemetry to an existing collector takes one call.
+  `WithService`, `WithResource`, `WithMetricInterval` and `WithoutMetrics`
+  adjust it; `NewWithMetrics` takes providers you build yourself.
+- Metrics alongside the spans: `http.server.request.duration`,
+  `http.client.request.duration`, `db.client.operation.duration`,
+  `go.memory.used` and `go.goroutine.count`, named after the OpenTelemetry
+  semantic conventions, labelled with the instance they came from.
+- Runtime samples reach exporters as a new `EventRuntime` event.
+
 ### Added — span identity and exporters
 
 - Requests, queries and outbound calls record their own span ID and their

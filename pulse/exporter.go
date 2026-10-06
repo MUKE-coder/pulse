@@ -13,8 +13,8 @@ import (
 // warehouse. Register one with [WithExporter].
 //
 // Every request is exported, whatever Tracing.SampleRate says; queries,
-// outbound calls, errors and captured log lines are exported as they are
-// recorded. Values have
+// outbound calls, errors, captured log lines and runtime samples are
+// exported as they are recorded. Values have
 // already been redacted. Records carry trace and span IDs (TraceID, SpanID,
 // ParentSpanID), so an exporter can rebuild each request's span tree.
 //
@@ -36,6 +36,7 @@ const (
 	EventDependency EventKind = "dependency" // Event.Dependency is set
 	EventError      EventKind = "error"      // Event.Error is set
 	EventLog        EventKind = "log"        // Event.Log is set
+	EventRuntime    EventKind = "runtime"    // Event.Runtime is set
 )
 
 // Event is one piece of telemetry handed to an [Exporter]. Exactly one of
@@ -48,6 +49,7 @@ type Event struct {
 	Dependency *DependencyMetric
 	Error      *ErrorRecord
 	Log        *LogRecord
+	Runtime    *RuntimeMetric
 }
 
 const (

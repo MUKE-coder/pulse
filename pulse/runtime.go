@@ -132,6 +132,9 @@ func (rs *RuntimeSampler) sample() {
 	// Broadcast runtime metrics to WebSocket clients
 	rs.pulse.BroadcastRuntime(metric)
 
+	exported := metric
+	rs.pulse.export(Event{Kind: EventRuntime, Runtime: &exported})
+
 	// Feed leak detector
 	rs.leakDetector.addSample(numGoroutines)
 }
