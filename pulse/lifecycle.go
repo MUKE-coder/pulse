@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -32,6 +33,28 @@ type lifecycleEvent struct {
 	PreviousUnclean bool `json:"previous_unclean,omitempty"`
 	// GapFrom is, for an unclean start, the last request recorded before it.
 	GapFrom *time.Time `json:"gap_from,omitempty"`
+	// Version is the build the process runs, so a start that follows a
+	// deploy can be told from a restart of the same build.
+	Version string `json:"version,omitempty"`
+}
+
+// buildVersion names the build this process runs: the VCS revision it was
+// built from, or the module version when it wasn't built from a repository.
+func buildVersion(info SystemInfo) string {
+	if info.VCSRevision != "" {
+		rev := info.VCSRevision
+		if len(rev) > 7 {
+			rev = rev[:7]
+		}
+		if info.VCSModified {
+			rev += "-dirty"
+		}
+		return rev
+	}
+	if info.BuildVersion != "" && info.BuildVersion != "(devel)" {
+		return info.BuildVersion
+	}
+	return ""
 }
 
 // lifecycleStore is implemented by storage backends that keep lifecycle
@@ -50,7 +73,8 @@ func recordStart(p *Pulse) {
 	if !ok {
 		return
 	}
-	e := lifecycleEvent{Type: lifecycleStart, InstanceID: p.config.InstanceID, At: p.startTime}
+	e := lifecycleEvent{Type: lifecycleStart, InstanceID: p.config.InstanceID, At: p.startTime,
+		Version: buildVersion(collectSystemInfo())}
 	if prev, err := ls.lastLifecycleEvent(p.config.InstanceID); err == nil && prev != nil && prev.Type == lifecycleStart {
 		e.PreviousUnclean = true
 		if t, ok := ls.lastRequestAt(); ok {
@@ -87,13 +111,24 @@ func lifecycleHandler(p *Pulse) gin.HandlerFunc {
 			}
 		}
 		_, persistent := p.storage.(rollupStore)
-		c.JSON(http.StatusOK, gin.H{
+		// When this build first started is when it was deployed; a start of
+		// the same build after it is a restart.
+		version := buildVersion(collectSystemInfo())
+		resp := gin.H{
 			"events":      events,
 			"instance_id": p.config.InstanceID,
 			"storage":     p.storageName(),
 			"persistent":  persistent,
 			"data_since":  p.rollups.dataSince(),
-		})
+			"version":     version,
+		}
+		for _, e := range events { // oldest first
+			if e.Type == lifecycleStart && e.Version == version {
+				resp["deployed_at"] = e.At
+				break
+			}
+		}
+		c.JSON(http.StatusOK, resp)
 	}
 }
 
@@ -115,6 +150,10 @@ func (s *MemoryStorage) lifecycleEvents(tr TimeRange) ([]lifecycleEvent, error) 
 			out = append(out, e)
 		}
 	}
+	// Oldest first, as the SQL backends return them: events can be stored
+	// out of order, a start backdated to the process's own start time among
+	// them.
+	sort.SliceStable(out, func(i, j int) bool { return out[i].At.Before(out[j].At) })
 	return out, nil
 }
 
@@ -148,8 +187,8 @@ func (s *sqlStore) storeLifecycleEvent(e lifecycleEvent) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	_, err := s.exec(
-		`INSERT INTO lifecycle_events (at, type, instance_id, previous_unclean, gap_from) VALUES (?, ?, ?, ?, ?)`,
-		e.At.UnixNano(), e.Type, e.InstanceID, boolToInt(e.PreviousUnclean), gapFrom,
+		`INSERT INTO lifecycle_events (at, type, instance_id, previous_unclean, gap_from, version) VALUES (?, ?, ?, ?, ?, ?)`,
+		e.At.UnixNano(), e.Type, e.InstanceID, boolToInt(e.PreviousUnclean), gapFrom, e.Version,
 	)
 	return err
 }
@@ -163,7 +202,7 @@ func (s *sqlStore) lifecycleEvents(tr TimeRange) ([]lifecycleEvent, error) {
 		end = tr.End.UnixNano()
 	}
 	rows, err := s.query(
-		`SELECT at, type, instance_id, previous_unclean, gap_from FROM lifecycle_events
+		`SELECT at, type, instance_id, previous_unclean, gap_from, version FROM lifecycle_events
 		 WHERE at BETWEEN ? AND ? ORDER BY at ASC`, start, end)
 	if err != nil {
 		return nil, err
@@ -182,7 +221,7 @@ func (s *sqlStore) lifecycleEvents(tr TimeRange) ([]lifecycleEvent, error) {
 
 func (s *sqlStore) lastLifecycleEvent(instanceID string) (*lifecycleEvent, error) {
 	row := s.queryRow(
-		`SELECT at, type, instance_id, previous_unclean, gap_from FROM lifecycle_events
+		`SELECT at, type, instance_id, previous_unclean, gap_from, version FROM lifecycle_events
 		 WHERE instance_id = ? ORDER BY at DESC LIMIT 1`, instanceID)
 	e, err := scanLifecycleEvent(row)
 	if err == sql.ErrNoRows {
@@ -210,7 +249,7 @@ func scanLifecycleEvent(r rowScanner) (lifecycleEvent, error) {
 		unclean int
 		gapFrom sql.NullInt64
 	)
-	if err := r.Scan(&at, &e.Type, &e.InstanceID, &unclean, &gapFrom); err != nil {
+	if err := r.Scan(&at, &e.Type, &e.InstanceID, &unclean, &gapFrom, &e.Version); err != nil {
 		return e, err
 	}
 	e.At = time.Unix(0, at)

@@ -20,12 +20,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Trace IDs on the Database page, in an error's detail and on the Logs
   page link straight to it.
 
+### Added — deploys on the timeline
+
+- Each process start records the build it runs (the VCS revision it was
+  built from, or the module version), so a start after a deploy can be
+  told from a restart of the same build. `GET /pulse/api/lifecycle` also
+  reports the running build and when it first started.
+- The dashboard names the build in the API section ("deployed 3h ago")
+  and marks each deploy on the request-rate chart, so a change in traffic,
+  latency or errors can be read against the release that caused it.
+
 ### Fixed
 
 - Outbound calls recorded their trace and span IDs in memory but the SQL
   backends dropped them, so a call could not be tied back to its request.
   The `dependencies` table now keeps them; existing databases gain the
   columns when opened, and trace lookups are indexed on all three tables.
+- The Memory backend returned lifecycle events in the order they were
+  stored while the SQL backends returned them oldest first. They now
+  agree, which matters because a process backdates its own start event.
 
 ## [1.2.0] — 2026-10-06
 

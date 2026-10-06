@@ -120,3 +120,66 @@ func TestLifecycle_UncleanRestartIsFlagged(t *testing.T) {
 		t.Errorf("instance api-2 has no history, got %+v", prev)
 	}
 }
+
+func TestBuildVersion(t *testing.T) {
+	cases := []struct {
+		name string
+		info SystemInfo
+		want string
+	}{
+		{"revision", SystemInfo{VCSRevision: "9f1c2b7e4a55d3"}, "9f1c2b7"},
+		{"dirty tree", SystemInfo{VCSRevision: "9f1c2b7e4a55d3", VCSModified: true}, "9f1c2b7-dirty"},
+		{"module version", SystemInfo{BuildVersion: "v1.2.0"}, "v1.2.0"},
+		{"go run", SystemInfo{BuildVersion: "(devel)"}, ""},
+		{"nothing stamped", SystemInfo{}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := buildVersion(c.info); got != c.want {
+				t.Errorf("buildVersion = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+func TestConformance_LifecycleVersionRoundTrips(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s Storage) {
+		ls := s.(lifecycleStore)
+		now := time.Now()
+		_ = ls.storeLifecycleEvent(lifecycleEvent{Type: lifecycleStart, InstanceID: "api-1",
+			At: now.Add(-time.Hour), Version: "abc1234"})
+		_ = ls.storeLifecycleEvent(lifecycleEvent{Type: lifecycleStart, InstanceID: "api-1",
+			At: now, Version: "def5678"})
+
+		events, err := ls.lifecycleEvents(wideRange())
+		if err != nil || len(events) != 2 {
+			t.Fatalf("got %d events (err %v), want 2", len(events), err)
+		}
+		if events[0].Version != "abc1234" || events[1].Version != "def5678" {
+			t.Errorf("versions = %q, %q; want the builds each start ran",
+				events[0].Version, events[1].Version)
+		}
+	})
+}
+
+// The lifecycle endpoint reports which build is running and when it first
+// started — the deploy the dashboard marks on its charts.
+func TestLifecycleHandler_ReportsTheRunningBuild(t *testing.T) {
+	p, _ := mountForLogs(t)
+	version := buildVersion(collectSystemInfo())
+	deployed := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
+	_ = p.storage.(lifecycleStore).storeLifecycleEvent(lifecycleEvent{
+		Type: lifecycleStart, InstanceID: "older", At: deployed, Version: version})
+
+	var resp struct {
+		Version    string    `json:"version"`
+		DeployedAt time.Time `json:"deployed_at"`
+	}
+	callLogsAPI(t, lifecycleHandler(p), "/lifecycle?range=24h", nil, &resp)
+	if resp.Version != version {
+		t.Errorf("version = %q, want %q", resp.Version, version)
+	}
+	if !resp.DeployedAt.Equal(deployed) {
+		t.Errorf("deployed_at = %s, want the first start of this build at %s", resp.DeployedAt, deployed)
+	}
+}

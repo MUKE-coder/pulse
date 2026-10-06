@@ -489,6 +489,7 @@ func initSQLiteSchema(db *sql.DB) error {
 // CREATE TABLE IF NOT EXISTS leaves an existing table alone, so databases
 // created by an earlier version get them through ALTER TABLE at open.
 var sqliteAddedColumns = []struct{ table, column, definition string }{
+	{"lifecycle_events", "version", "TEXT NOT NULL DEFAULT ''"},    // v1.2.1
 	{"dependencies", "trace_id", "TEXT NOT NULL DEFAULT ''"},       // v1.2.1
 	{"dependencies", "span_id", "TEXT NOT NULL DEFAULT ''"},        // v1.2.1
 	{"dependencies", "parent_span_id", "TEXT NOT NULL DEFAULT ''"}, // v1.2.1

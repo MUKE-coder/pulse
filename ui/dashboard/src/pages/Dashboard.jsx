@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import { Area, AreaChart, CartesianGrid, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { useAPI } from '../hooks/useAPI'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useTheme } from '../hooks/useTheme'
@@ -22,6 +22,7 @@ const paths = (range) => ({
   alerts: '/alerts?range=24h&limit=6',
   logs: `/logs?range=${range}&level=warn&limit=40`,
   instances: '/instances',
+  lifecycle: `/lifecycle?range=${range}`,
   storage: '/storage',
   health: '/health/checks',
 })
@@ -35,6 +36,13 @@ const ms = (ns) => {
 const pct = (v) => `${(v || 0).toFixed(v >= 10 ? 0 : 2)}%`
 const clock = (t) => new Date(t).toLocaleTimeString([], { hour12: false })
 const bytes = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${(mb || 0).toFixed(1)} MB`)
+const ago = (t) => {
+  const s = (Date.now() - new Date(t).getTime()) / 1000
+  if (s < 90) return `${Math.round(s)}s ago`
+  if (s < 5400) return `${Math.round(s / 60)}m ago`
+  if (s < 172800) return `${Math.round(s / 3600)}h ago`
+  return `${Math.round(s / 86400)}d ago`
+}
 
 // Thresholds that decide a section's pill. Deliberately plain: a rate over
 // 5% is bad, anything measurable is worth a warning.
@@ -64,7 +72,7 @@ function delta(points, { lowerIsBetter = false, unit = '' } = {}) {
 
 // TimeChart is the shape every timeline on this page takes: one filled
 // series, muted grid, time along the bottom.
-function TimeChart({ data, color, palette, format = (v) => v, short }) {
+function TimeChart({ data, color, palette, format = (v) => v, short, markers = [] }) {
   if (!data || data.length < 2) return <Empty>Not enough data yet</Empty>
   const id = `g${color.replace(/[^a-z0-9]/gi, '')}`
   return (
@@ -86,6 +94,10 @@ function TimeChart({ data, color, palette, format = (v) => v, short }) {
           <Tooltip labelFormatter={clock} formatter={(v) => [format(v), '']} separator=""
             contentStyle={{ background: palette.surface, border: `1px solid ${palette.line}`,
               borderRadius: 8, fontSize: 12, color: palette.ink }} />
+          {markers.map((m) => (
+            <ReferenceLine key={m.at} x={m.at} stroke={palette.ink3} strokeDasharray="3 3"
+              label={{ value: m.label, position: 'insideTopRight', fill: palette.ink3, fontSize: 10 }} />
+          ))}
           <Area type="monotone" dataKey="v" stroke={color} strokeWidth={1.8} fill={`url(#${id})`}
             dot={false} isAnimationActive={false} />
         </AreaChart>
@@ -164,6 +176,12 @@ export default function Dashboard() {
   const fiveXX = (r) => Object.entries(r.status_codes || {})
     .reduce((n, [code, count]) => n + (Number(code) >= 500 ? count : 0), 0)
   const slowest = [...routes].sort((a, b) => (b.p95_latency || 0) - (a.p95_latency || 0)).slice(0, 6)
+  const lifecycle = data.lifecycle || {}
+  const starts = (lifecycle.events || []).filter((e) => e.type === 'start')
+  const deploys = starts
+    .filter((e, i) => i === 0 || starts[i - 1].version !== e.version)
+    .filter((e) => e.version)
+    .map((e) => ({ at: new Date(e.at).getTime(), label: e.version }))
   const trafficDelta = delta(o.throughput_series)
   const errorDelta = delta(o.error_series, { lowerIsBetter: true })
 
@@ -238,10 +256,13 @@ export default function Dashboard() {
       </div>
 
       <Section title="API" status={apiTone === 'ok' ? 'healthy' : apiTone === 'warn' ? 'degraded' : 'unhealthy'}
-        tone={apiTone} meta={`${routes.length} routes · ${num(o.total_requests)} requests`} />
+        tone={apiTone} meta={`${routes.length} routes · ${num(o.total_requests)} requests${
+          lifecycle.version ? ` · ${lifecycle.version}` : ''}${
+          lifecycle.deployed_at ? `, deployed ${ago(lifecycle.deployed_at)}` : ''}`} />
       <div className="ops-grid">
         <Panel title="Request rate" now={`${(o.rpm || 0).toFixed(1)}/min`} width="w6">
-          <TimeChart data={throughput} color={palette.accent} palette={palette} format={(v) => num(v)} />
+          <TimeChart data={throughput} color={palette.accent} palette={palette} format={(v) => num(v)}
+            markers={deploys} />
         </Panel>
         <Panel title="Errors" now={pct(o.error_rate)} width="w6">
           <TimeChart data={errorSeries} color={palette.bad} palette={palette} format={(v) => num(v)} />
