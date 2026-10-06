@@ -7,10 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [1.2.0] — Unreleased
+## [1.2.0] — 2026-10-06
 
-In progress: the v1.2 part of the follow-up plan. API changes are additive
-only.
+Span identity and exporters, log capture, PostgreSQL storage shared by
+several instances, and an Overview rebuilt as an ops view. API changes are
+additive only.
 
 ### Changed — the dashboard's Overview is now an ops view
 
