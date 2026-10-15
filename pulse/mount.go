@@ -143,6 +143,13 @@ func Mount(ctx context.Context, router *gin.Engine, db *gorm.DB, opts ...Option)
 		if err := db.Use(plugin); err != nil {
 			log.Printf("[pulse] warning: failed to register GORM plugin: %v", err)
 		}
+
+		// Ask the database why a slow query is slow, when asked to: it
+		// issues extra read-only queries, so it stays opt-in.
+		if boolValue(cfg.Database.ExplainSlowQueries) {
+			p.explainer = newExplainer(p, db)
+			startExplainer(p)
+		}
 	}
 
 	// Start runtime metrics sampler

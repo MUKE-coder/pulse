@@ -356,6 +356,18 @@ func WithProfiling() Option {
 	return func(c *Config) { c.Profiling.Enabled = boolPtr(true) }
 }
 
+// WithExplainSlowQueries asks the database for the plan of a slow SELECT —
+// at most one per query pattern per interval (zero means the default hour),
+// on a background goroutine. It issues extra read-only queries against your
+// database, which is why it is off by default; EXPLAIN ANALYZE, which would
+// run the query a second time, is never used.
+func WithExplainSlowQueries(interval time.Duration) Option {
+	return func(c *Config) {
+		c.Database.ExplainSlowQueries = Bool(true)
+		c.Database.ExplainInterval = interval
+	}
+}
+
 // WithMutexProfiling turns on the runtime's mutex profile, sampling one in
 // every fraction contention events, so GET /pulse/api/profile/mutex shows
 // where locks are contended. The runtime keeps this off by default because

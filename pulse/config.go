@@ -332,6 +332,15 @@ type DatabaseConfig struct {
 	N1Threshold int
 	// TrackCallers captures the source file:line for queries (default: true).
 	TrackCallers *bool
+	// ExplainSlowQueries asks the database for the plan of a slow SELECT —
+	// at most one per query pattern per ExplainInterval, on a background
+	// goroutine (default: false). It issues extra read-only queries against
+	// your database, which is why it is opt-in; EXPLAIN ANALYZE, which
+	// would run the query again, is never used.
+	ExplainSlowQueries *bool
+	// ExplainInterval is the minimum time between plans for one query
+	// pattern (default: 1h).
+	ExplainInterval time.Duration
 }
 
 // RuntimeConfig configures Go runtime metrics sampling.
@@ -682,6 +691,10 @@ func applyDefaults(cfg Config) Config {
 	}
 	if cfg.Profiling.DebugHandlers == nil {
 		cfg.Profiling.DebugHandlers = boolPtr(false)
+	}
+
+	if cfg.Database.ExplainSlowQueries == nil {
+		cfg.Database.ExplainSlowQueries = boolPtr(false)
 	}
 
 	// Baselines

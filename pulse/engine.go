@@ -66,6 +66,10 @@ type Pulse struct {
 	// GORM plugin
 	gormPlugin *PulsePlugin
 
+	// explainer asks the database for the plans of slow queries; nil unless
+	// Database.ExplainSlowQueries is on (see explain.go).
+	explainer *explainer
+
 	// Runtime sampler
 	runtimeSampler *RuntimeSampler
 

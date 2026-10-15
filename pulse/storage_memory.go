@@ -55,6 +55,10 @@ type MemoryStorage struct {
 	routeHours   []storedRouteHour
 	routeHoursMu sync.Mutex
 
+	// Query plans, one per query pattern; see explain.go.
+	plans   map[string]QueryPlan
+	plansMu sync.Mutex
+
 	// Captured log lines, allocated on first use; see logs.go.
 	logs        atomic.Pointer[RingBuffer[LogRecord]]
 	logCapacity int
@@ -904,6 +908,10 @@ func (s *MemoryStorage) Reset() error {
 	s.routeHoursMu.Lock()
 	s.routeHours = nil
 	s.routeHoursMu.Unlock()
+
+	s.plansMu.Lock()
+	s.plans = nil
+	s.plansMu.Unlock()
 
 	return nil
 }

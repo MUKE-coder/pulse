@@ -51,6 +51,7 @@ Pulse gives you full visibility into your application's HTTP requests, database 
 - **Health Checks** — Pluggable health check system with Kubernetes-compatible endpoints (`/live`, `/ready`), composite status, and flapping detection.
 - **Alerting Engine** — Threshold-based rules with two-phase firing (prevents false alerts), cooldown periods, and multi-channel notifications (Slack, Discord, Email, Webhooks with HMAC signatures).
 - **SLOs with burn-rate alerts** — Multiwindow burn-rate alerting (Google SRE workbook), computed from exact per-minute counts of every request, so sampling never skews compliance. Survives restarts with the SQLite backend.
+- **Query plans for slow queries** — Opt in and Pulse asks the database why a slow `SELECT` is slow, reading the sequential scan or the filesort off the plan. `EXPLAIN` only, one plan per pattern per hour, off the request path.
 - **Per-route baselines** — Each route's hourly p95 is summarised and kept for 30 days, so Pulse can say a route *got slower*, not just that it is slow. A sustained regression against the median of the last week pages once, with the numbers to decide on a rollback.
 - **Secret redaction** — Passwords, tokens, card numbers, JWTs and keys are stripped from captured request context, error messages and outbound URLs before anything is stored, whatever the field name or naming style. Configurable.
 - **Load-test overlay** — k6 (or any harness) runs appear as bands on the dashboard timelines, with a before/during/after comparison and time to recovery.
@@ -334,6 +335,8 @@ Database: pulse.DatabaseConfig{
     DetectN1:           pulse.Bool(true),       // default: true
     N1Threshold:        5,                   // repeated patterns to flag (default: 5)
     TrackCallers:       pulse.Bool(true),       // capture file:line (default: true)
+    ExplainSlowQueries: pulse.Bool(false),      // ask the database for plans (default: false)
+    ExplainInterval:    time.Hour,              // at most one plan per pattern per... (default: 1h)
 },
 ```
 
@@ -342,6 +345,26 @@ Pulse registers a GORM plugin that hooks into Create, Query, Update, Delete, Row
 - Caller source file and line number
 - N+1 query detection per request (via trace ID correlation)
 - Connection pool statistics (open, in-use, idle connections)
+
+**Query plans (opt-in).** A slow query says what took long; its plan says why. With `pulse.WithExplainSlowQueries(0)` (or `ExplainSlowQueries: pulse.Bool(true)`), Pulse asks the database for the plan of a slow `SELECT` and shows it on the Database page under **Query Plans**, with the handful of things that usually explain it read off the top:
+
+```
+SELECT * FROM orders WHERE user_id = ?                                      412ms
+reads the whole table: SCAN orders
+  SCAN orders
+captured 14:02:11
+```
+
+The guardrails are the point, since this runs queries against your database:
+
+- **`EXPLAIN` only, never `EXPLAIN ANALYZE`** — the slow query is never run a second time.
+- **`SELECT` only.** Explaining a write executes it on some databases, so writes are never explained.
+- **At most one plan per query pattern per `ExplainInterval`** (default an hour), on a background goroutine with a 2s timeout. Nothing happens on the request path, and a full queue drops rather than waits.
+- It goes **straight down the connection pool**, so Pulse's own `EXPLAIN` isn't recorded as one of your queries.
+- Plans are **scrubbed** before storage, like everything else Pulse keeps, because a plan can echo the values a query filtered on.
+- Pulse knows how to ask PostgreSQL, MySQL and SQLite. On any other dialect it asks nothing.
+
+One plan is kept per pattern — always the latest — up to 200, and `GET /pulse/api/database/plans` serves them.
 
 ### Runtime Metrics
 
@@ -972,6 +995,7 @@ All endpoints under `/pulse/api/` require JWT authentication (except login).
 | `GET` | `/pulse/api/database/n1` | `?range=1h` | N+1 query detections (raw, per-request) |
 | `GET` | `/pulse/api/database/n1/ranked` | `?range=1h&limit=50` | N+1 grouped by (route, pattern), ranked by impact score |
 | `GET` | `/pulse/api/database/pool` | | Connection pool stats |
+| `GET` | `/pulse/api/database/plans` | `?limit=20` | Captured query plans, newest first |
 
 ### Errors
 

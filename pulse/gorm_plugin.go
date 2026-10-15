@@ -199,6 +199,13 @@ func (p *PulsePlugin) afterCallback(db *gorm.DB) {
 	if boolValue(cfg.DetectN1) && traceID != "" && normalized.Normalized != "" {
 		p.trackN1(traceID, route, normalized.Normalized, duration)
 	}
+
+	// A slow query says what took long; its plan says why. Asking is left
+	// to the explainer's own goroutine, so the request that triggered it
+	// is long gone by then (see explain.go).
+	if e := p.pulse.explainer; e != nil && duration >= cfg.SlowQueryThreshold {
+		e.consider(explainJob{metric: metric, sql: sql, vars: db.Statement.Vars})
+	}
 }
 
 // trackN1 tallies one execution of normalizedSQL under traceID. Detections

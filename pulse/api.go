@@ -135,6 +135,7 @@ func registerAPIRoutes(router *gin.Engine, p *Pulse) {
 	protected.GET("/database/n1", dbN1Handler(p))
 	protected.GET("/database/n1/ranked", dbN1RankedHandler(p))
 	protected.GET("/database/pool", dbPoolHandler(p))
+	protected.GET("/database/plans", plansHandler(p))
 
 	// Outbound dependencies
 	protected.GET("/dependencies", dependenciesHandler(p))

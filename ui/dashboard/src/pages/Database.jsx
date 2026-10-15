@@ -19,24 +19,27 @@ export default function DatabasePage() {
   const [patterns, setPatterns] = useState([])
   const [n1, setN1] = useState([])
   const [pool, setPool] = useState(null)
+  const [plans, setPlans] = useState(null)
   const [tab, setTab] = useState('slow')
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     const load = async () => {
       try {
-        const [oRes, sRes, pRes, nRes, poolRes] = await Promise.all([
+        const [oRes, sRes, pRes, nRes, poolRes, planRes] = await Promise.all([
           get('/database/overview?range=1h'),
           get('/database/slow-queries?limit=50'),
           get('/database/patterns?range=1h'),
           get('/database/n1?range=1h'),
           get('/database/pool'),
+          get('/database/plans?limit=50'),
         ])
         if (oRes.ok) setOverview(await oRes.json())
         if (sRes.ok) setSlowQueries(await sRes.json())
         if (pRes.ok) setPatterns(await pRes.json())
         if (nRes.ok) setN1(await nRes.json())
         if (poolRes.ok) setPool(await poolRes.json())
+        if (planRes.ok) setPlans(await planRes.json())
       } catch {}
       setLoading(false)
     }
@@ -92,6 +95,7 @@ export default function DatabasePage() {
     { id: 'slow', label: 'Slow Queries', count: slowQueries?.length },
     { id: 'patterns', label: 'Patterns', count: patterns?.length },
     { id: 'n1', label: 'N+1 Detections', count: n1?.length },
+    { id: 'plans', label: 'Query Plans', count: plans?.plans?.length },
   ]
 
   if (loading) return <div style={{ color: '#64748b', padding: 40 }}>Loading...</div>
@@ -141,6 +145,56 @@ export default function DatabasePage() {
       {tab === 'slow' && <DataTable columns={slowCols} data={slowQueries || []} emptyText="No slow queries detected" />}
       {tab === 'patterns' && <DataTable columns={patternCols} data={patterns || []} emptyText="No query patterns yet" />}
       {tab === 'n1' && <DataTable columns={n1Cols} data={n1 || []} emptyText="No N+1 queries detected" />}
+      {tab === 'plans' && <QueryPlans data={plans} />}
+    </div>
+  )
+}
+
+// QueryPlans shows what the database said about each slow pattern. The plan
+// text is kept verbatim next to the hints, because a hint is a guess and
+// the plan is the evidence.
+function QueryPlans({ data }) {
+  if (!data?.supported) {
+    return <div style={{ color: '#64748b', padding: 24, fontSize: 13 }}>
+      This storage backend does not keep query plans.
+    </div>
+  }
+  if (!data.capturing && !(data.plans || []).length) {
+    return <div style={{ color: '#64748b', padding: 24, fontSize: 13, lineHeight: 1.7 }}>
+      Query plans are off. Mount Pulse with <code style={{ color: '#818cf8' }}>pulse.WithExplainSlowQueries(0)</code> and
+      Pulse will ask the database for the plan of a slow SELECT — at most one per query pattern per hour,
+      on a background goroutine. EXPLAIN only: the query is never run again.
+    </div>
+  }
+  if (!(data.plans || []).length) {
+    return <div style={{ color: '#64748b', padding: 24, fontSize: 13 }}>
+      Capturing. No slow query has needed a plan yet.
+    </div>
+  }
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {data.plans.map((p) => (
+        <div key={p.normalized_sql} style={{
+          background: '#111118', border: '1px solid #1e1e2e', borderRadius: 8, padding: 14,
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, marginBottom: 8 }}>
+            <code style={{ fontSize: 12, color: '#e2e8f0', wordBreak: 'break-all' }}>{p.normalized_sql}</code>
+            <span style={{ fontSize: 12, color: '#f59e0b', whiteSpace: 'nowrap' }}>
+              {(p.duration / 1e6).toFixed(1)}ms
+            </span>
+          </div>
+          {(p.hints || []).map((h) => (
+            <div key={h} style={{ fontSize: 12, color: '#ef4444', marginBottom: 4 }}>{h}</div>
+          ))}
+          <pre style={{
+            margin: '8px 0 0', padding: 10, background: '#0b0b10', borderRadius: 6,
+            fontSize: 11, color: '#94a3b8', overflowX: 'auto', whiteSpace: 'pre-wrap',
+          }}>{p.plan}</pre>
+          <div style={{ fontSize: 11, color: '#64748b', marginTop: 6 }}>
+            captured {new Date(p.captured_at).toLocaleString()}
+          </div>
+        </div>
+      ))}
     </div>
   )
 }

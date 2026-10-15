@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — why a slow query is slow
+
+- `WithExplainSlowQueries(interval)` asks the database for the plan of a
+  slow `SELECT` and keeps it: the Database page gains a **Query Plans**
+  tab, `GET /pulse/api/database/plans` serves them, and the few things
+  that usually explain a slow query are read off the plan — a sequential
+  scan, a sort spilling to disk, a filesort, a temporary table. The plan
+  itself is kept verbatim next to the hint, because the hint is a guess
+  and the plan is the evidence.
+- Off by default, because it issues queries against your database. When on:
+  `EXPLAIN` only and never `EXPLAIN ANALYZE`, so the slow query is never
+  run again; `SELECT` only, because explaining a write runs it on some
+  databases; at most one plan per query pattern per interval (default an
+  hour), on a background goroutine with a 2s timeout and a queue that
+  drops rather than waits; and straight down the connection pool, so
+  Pulse's own `EXPLAIN` is not recorded as one of your queries.
+- Plans are scrubbed before storage like everything else Pulse keeps — a
+  plan can echo the values a query filtered on — and one plan is kept per
+  pattern, always the latest, up to 200. PostgreSQL, MySQL and SQLite;
+  any other dialect is left alone.
+
 ### Added — a route that got slower (#8)
 
 - Per-route baselines: each hour, every route's traffic is summarised to
