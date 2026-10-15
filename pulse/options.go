@@ -355,3 +355,27 @@ func WithUSEDisabled() Option {
 func WithProfiling() Option {
 	return func(c *Config) { c.Profiling.Enabled = boolPtr(true) }
 }
+
+// WithMutexProfiling turns on the runtime's mutex profile, sampling one in
+// every fraction contention events, so GET /pulse/api/profile/mutex shows
+// where locks are contended. The runtime keeps this off by default because
+// it costs a little on every contended lock; it stays off unless asked for,
+// and still needs the two profiling gates to be readable.
+func WithMutexProfiling(fraction int) Option {
+	return func(c *Config) { c.Profiling.MutexProfileFraction = fraction }
+}
+
+// WithBlockProfiling turns on the runtime's block profile, sampling one
+// event per rate nanoseconds spent blocked, so GET /pulse/api/profile/block
+// shows where goroutines wait. Same trade-off as [WithMutexProfiling]:
+// 10000 (10µs) is a common starting point.
+func WithBlockProfiling(rate int) Option {
+	return func(c *Config) { c.Profiling.BlockProfileRate = rate }
+}
+
+// WithPprofHandlers also mounts the standard net/http/pprof handlers under
+// <prefix>/debug/pprof, where muscle memory reaches for them, behind the
+// same gate as every other profile.
+func WithPprofHandlers() Option {
+	return func(c *Config) { c.Profiling.DebugHandlers = boolPtr(true) }
+}

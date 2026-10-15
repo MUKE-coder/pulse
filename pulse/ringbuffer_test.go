@@ -209,3 +209,50 @@ func BenchmarkRingBuffer_GetLast(b *testing.B) {
 		rb.GetLast(100)
 	}
 }
+
+// A buffer holds what it has been given, not what it may one day hold: the
+// default capacities would otherwise reserve tens of megabytes in a process
+// that has served a handful of requests.
+func TestRingBuffer_GrowsWithItsContents(t *testing.T) {
+	rb := NewRingBuffer[int](100000)
+	if got := cap(rb.data); got > initialRingChunk {
+		t.Errorf("a fresh buffer reserved %d of 100000 slots, want at most %d", got, initialRingChunk)
+	}
+
+	for i := 0; i < 1000; i++ {
+		rb.Push(i)
+	}
+	if got := len(rb.data); got != 1000 {
+		t.Errorf("backing slots = %d after 1000 pushes, want 1000", got)
+	}
+	if rb.Len() != 1000 {
+		t.Errorf("Len = %d, want 1000", rb.Len())
+	}
+}
+
+// Once full it wraps as before, overwriting the oldest, and Reset hands the
+// memory back.
+func TestRingBuffer_WrapsThenResetReleases(t *testing.T) {
+	rb := NewRingBuffer[int](4)
+	for i := 1; i <= 6; i++ {
+		rb.Push(i)
+	}
+	got := rb.GetAll()
+	want := []int{3, 4, 5, 6}
+	if len(got) != len(want) {
+		t.Fatalf("GetAll = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("GetAll = %v, want %v", got, want)
+		}
+	}
+	if len(rb.data) != 4 {
+		t.Errorf("backing slots = %d once full, want the capacity 4", len(rb.data))
+	}
+
+	rb.Reset()
+	if rb.Len() != 0 || len(rb.data) != 0 {
+		t.Errorf("after Reset: Len = %d, slots = %d; want nothing held", rb.Len(), len(rb.data))
+	}
+}

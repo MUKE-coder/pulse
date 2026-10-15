@@ -131,6 +131,19 @@ type ProfilingConfig struct {
 	MaxDuration time.Duration
 	// SampleHz is the per-second stack sample rate. Default: 100.
 	SampleHz int
+
+	// MutexProfileFraction turns on the runtime's mutex profile: one in
+	// every N contention events is sampled (0: off, the default). It is
+	// separate from Enabled because the runtime pays a little on every
+	// contended lock for as long as it is on.
+	MutexProfileFraction int
+	// BlockProfileRate turns on the runtime's block profile: one event per
+	// N nanoseconds spent blocked is sampled (0: off, the default). Same
+	// trade-off as MutexProfileFraction.
+	BlockProfileRate int
+	// DebugHandlers also mounts the standard net/http/pprof handlers under
+	// <Prefix>/debug/pprof (default: false), behind the same gate.
+	DebugHandlers *bool
 }
 
 // USEConfig configures Brendan Gregg's USE-method dashboard (Utilization /
@@ -591,6 +604,9 @@ func applyDefaults(cfg Config) Config {
 	}
 	if cfg.Profiling.SampleHz == 0 {
 		cfg.Profiling.SampleHz = defaults.Profiling.SampleHz
+	}
+	if cfg.Profiling.DebugHandlers == nil {
+		cfg.Profiling.DebugHandlers = boolPtr(false)
 	}
 
 	return cfg

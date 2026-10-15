@@ -555,7 +555,34 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 Only one sample window is active at a time. Concurrent requests get `409 Conflict` — running two profiles simultaneously doubles CPU cost and produces overlapping noise. Override the defaults in code via `Config.Profiling.DefaultDuration`, `Config.Profiling.MaxDuration`, `Config.Profiling.SampleHz`.
 
-> **Why `runtime.GoroutineProfile` instead of `runtime/pprof`?** Pulse skips the pprof protobuf and walks live goroutine stacks directly. The resulting flame graph emphasises **hot code paths** rather than literal CPU time — which is usually what operators want when chasing a regression. Bonus: no `github.com/google/pprof` tree in your dependency graph.
+> **Why `runtime.GoroutineProfile` for the flame graph?** It needs no pprof protobuf, no extra dependency and no tooling to read — a flame graph in the browser, always available once gated on. What it cannot answer is what allocates and what contends, because neither is in a goroutine stack dump, and it cannot give true CPU attribution, because a goroutine blocked in a syscall weighs the same as one burning processor. For those, Pulse serves the runtime's own profiles.
+
+#### The runtime's profiles, for `go tool pprof`
+
+Behind the same two gates, Pulse serves the standard profiles as pprof protobuf, so existing tools read them as they are:
+
+```bash
+TOKEN=$(curl -s -XPOST -d '{"username":"admin","password":"..."}' localhost:8080/pulse/api/auth/login | jq -r .token)
+
+go tool pprof "http://localhost:8080/pulse/api/profile/heap?token=$TOKEN"     # what is on the heap
+go tool pprof "http://localhost:8080/pulse/api/profile/allocs?token=$TOKEN"   # everything allocated since start
+go tool pprof "http://localhost:8080/pulse/api/profile/cpu?seconds=30&token=$TOKEN"
+```
+
+`go tool pprof` cannot set headers, so these endpoints also take the dashboard token as `?token=`. Capture two and compare them — `go tool pprof -diff_base before.pprof after.pprof` — which is the thing a heap profile is for.
+
+**Mutex and block profiles are off until you ask**, because the runtime pays for them on every contended lock or blocking operation for as long as they are on. Rather than serve an empty profile that reads as "no contention", Pulse answers `409` and says how to turn it on:
+
+```go
+pulse.Mount(ctx, router, db,
+    pulse.WithProfiling(),
+    pulse.WithMutexProfiling(5),      // sample one in 5 contention events
+    pulse.WithBlockProfiling(10_000), // sample one event per 10µs blocked
+    pulse.WithPprofHandlers(),        // also mount /pulse/debug/pprof/*
+)
+```
+
+`GET /pulse/api/profile/list` says which profiles this process is keeping and how many records each holds. `pulse.WithPprofHandlers()` additionally mounts the standard `net/http/pprof` handlers under `<prefix>/debug/pprof`, where muscle memory reaches for them — behind the same gates and the same authentication.
 
 ### k6 test-run overlay
 
@@ -987,8 +1014,12 @@ All endpoints under `/pulse/api/` require JWT authentication (except login).
 |--------|----------|-------------|
 | `GET` | `/pulse/api/profile/flamegraph?duration=10s&hz=100` | Sample the runtime and return an SVG flame graph. `?format=json` returns the folded tree; `?cache=true` reuses a recent sample if available |
 | `GET` | `/pulse/api/profile/folded` | Same window, but emits Brendan Gregg's folded-stack text format for piping into other tooling |
+| `GET` | `/pulse/api/profile/heap` · `allocs` · `goroutine` · `mutex` · `block` · `threadcreate` | The runtime's own profiles as pprof protobuf, for `go tool pprof`. `?debug=1` returns text. Mutex and block answer `409` until turned on |
+| `GET` | `/pulse/api/profile/cpu?seconds=30` | A CPU profile sampled over the window (default 10s, capped at 120s), one at a time |
+| `GET` | `/pulse/api/profile/list` | Which profiles this process keeps, and how many records each holds |
+| `GET` | `/pulse/debug/pprof/*` | The standard `net/http/pprof` handlers, when `pulse.WithPprofHandlers()` is set |
 
-**Both endpoints are double-gated** — they return `503` unless `pulse.WithProfiling()` is set AND `PULSE_PROFILE_ENABLED=true` is in the environment. See [Profiling section](#flame-graph-profiling).
+**Every endpoint here is double-gated** — they return `503` unless `pulse.WithProfiling()` is set AND `PULSE_PROFILE_ENABLED=true` is in the environment. See [Profiling section](#flame-graph-profiling).
 
 ### Settings & Data
 

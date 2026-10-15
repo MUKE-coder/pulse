@@ -17,13 +17,20 @@ type RingBuffer[T any] struct {
 	mu       sync.RWMutex // protects reads for consistent snapshots
 }
 
-// NewRingBuffer creates a new RingBuffer with the given capacity.
+// initialRingChunk is how many slots a buffer starts with. The rest are
+// added as records arrive: the default capacities (100,000 requests, 50,000
+// queries, 50,000 dependencies) are tens of megabytes, and a process that
+// has served a hundred requests should hold a hundred requests.
+const initialRingChunk = 512
+
+// NewRingBuffer creates a new RingBuffer with the given capacity. Memory
+// grows with the records stored, up to that capacity.
 func NewRingBuffer[T any](capacity int) *RingBuffer[T] {
 	if capacity <= 0 {
 		capacity = 1024
 	}
 	return &RingBuffer[T]{
-		data:     make([]T, capacity),
+		data:     make([]T, 0, min(capacity, initialRingChunk)),
 		capacity: int64(capacity),
 	}
 }
@@ -35,6 +42,12 @@ func (rb *RingBuffer[T]) Push(item T) {
 	pos := idx % rb.capacity
 
 	rb.mu.Lock()
+	// Until the buffer has wrapped once, grow it to reach this slot rather
+	// than holding the whole capacity from the start.
+	for int64(len(rb.data)) <= pos {
+		var zero T
+		rb.data = append(rb.data, zero)
+	}
 	rb.data[pos] = item
 	rb.mu.Unlock()
 
@@ -136,10 +149,8 @@ func (rb *RingBuffer[T]) Reset() {
 
 	rb.head.Store(0)
 	rb.size.Store(0)
-	var zero T
-	for i := range rb.data {
-		rb.data[i] = zero
-	}
+	// Hand the memory back rather than keeping a cleared buffer around.
+	rb.data = make([]T, 0, min(int(rb.capacity), initialRingChunk))
 }
 
 // ForEach iterates over all items from oldest to newest, calling fn for each.

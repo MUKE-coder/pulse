@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — the runtime's own profiles (#7)
+
+- `GET /pulse/api/profile/{heap,allocs,goroutine,mutex,block,threadcreate}`
+  and `/profile/cpu?seconds=N` serve standard pprof protobuf, so
+  `go tool pprof "http://host/pulse/api/profile/heap?token=…"` works with
+  no new tooling and `-diff_base` compares two captures. The sampled flame
+  graph stays as it is: it answers where goroutines sit, these answer what
+  allocates and what contends.
+- Mutex and block profiling cost the runtime something while on, so they
+  stay off until asked for with `WithMutexProfiling(fraction)` or
+  `WithBlockProfiling(rate)`. Until then the endpoints answer `409` with
+  how to turn them on, rather than serving an empty profile that reads as
+  "no contention".
+- `WithPprofHandlers()` also mounts the standard `net/http/pprof` handlers
+  under `<prefix>/debug/pprof`. `GET /pulse/api/profile/list` says which
+  profiles the process is keeping.
+- All of it sits behind the two gates the flame graph already uses, and
+  takes the dashboard token as `?token=` as well as a header, because
+  `go tool pprof` cannot set headers.
+
+### Fixed — the Memory backend reserved its whole capacity up front
+
+- A ring buffer allocated every slot when it was created, so a process that
+  had served nothing still held the default capacities: 100,000 requests,
+  50,000 queries, 50,000 outbound calls. The first heap profile taken with
+  the new endpoints showed Pulse itself as 38MB of a 45MB heap in an idle
+  process.
+- Buffers now grow with what they hold, up to the same capacity, and Reset
+  hands the memory back. The same process now holds 4.6MB, with no Pulse
+  allocation among the top nodes. Nothing about retention changes.
+
 ### Added — one request, end to end
 
 - A trace view: `GET /pulse/api/traces/:id` returns every span Pulse

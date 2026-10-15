@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"runtime"
 	"strings"
 	"time"
 
@@ -196,6 +197,20 @@ func Mount(ctx context.Context, router *gin.Engine, db *gorm.DB, opts ...Option)
 		p.profileSampler = newProfileSampler(p)
 	}
 
+	// The runtime keeps mutex and block profiling off until asked, because
+	// both cost a little while on. Only turn them on when profiling is
+	// permitted outright, and say so.
+	if profilingPermitted(cfg) {
+		if n := cfg.Profiling.MutexProfileFraction; n > 0 {
+			runtime.SetMutexProfileFraction(n)
+			log.Printf("[pulse] mutex profiling on: sampling one in %d contention events", n)
+		}
+		if rate := cfg.Profiling.BlockProfileRate; rate > 0 {
+			runtime.SetBlockProfileRate(rate)
+			log.Printf("[pulse] block profiling on: sampling one event per %dns blocked", rate)
+		}
+	}
+
 	// Register error tracking middleware (outermost — catches panics from all handlers)
 	if boolValue(cfg.Errors.Enabled) {
 		router.Use(newErrorMiddleware(p))
@@ -221,6 +236,9 @@ func Mount(ctx context.Context, router *gin.Engine, db *gorm.DB, opts ...Option)
 
 	// Register REST API endpoints
 	registerAPIRoutes(router, p)
+
+	// The runtime's own profiles, for go tool pprof
+	registerProfileRoutes(router, p)
 
 	// Serve embedded React dashboard
 	prefix := cfg.Prefix
