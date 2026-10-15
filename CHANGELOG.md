@@ -28,6 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   100ms baseline over 142 hours, for the last 1h0m0s"*. It closes itself
   when the route recovers, and on shared storage only the leader alerts, so
   a cluster pages once.
+- When the slowdown began within a day of the running build's first start,
+  the alert names that build (`which began 12m0s after a1b2c3d was
+  deployed`), so a step change reads as "this release got slower" rather
+  than "something got slower". A restart of the same build is not a deploy,
+  so attribution runs from when the build first appeared.
 - Nothing is flagged without evidence: a route needs `MinHours` (6)
   qualifying hours of history and `MinRequests` (20) in the hour in
   progress, so a deploy that is slow for ten minutes, or a handful of slow

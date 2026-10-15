@@ -352,3 +352,47 @@ func TestAPI_RouteBaselines(t *testing.T) {
 		t.Errorf("baseline comparison wrong: %+v", got)
 	}
 }
+
+// A regression that begins soon after a deploy names it; one that predates
+// the running build, or long outlives its deploy, does not.
+func TestDeployAttribution_BlamesTheDeployARegressionBeganUnder(t *testing.T) {
+	p := newTestPulse(t)
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	p.now = func() time.Time { return now }
+	deployedAt := now.Add(-90 * time.Minute)
+
+	store := p.storage.(lifecycleStore)
+	for _, e := range []lifecycleEvent{
+		{Type: lifecycleStart, InstanceID: "web-1", At: now.Add(-20 * 24 * time.Hour), Version: "oldbuild"},
+		{Type: lifecycleStart, InstanceID: "web-1", At: deployedAt, Version: "a1b2c3d"},
+		{Type: lifecycleStart, InstanceID: "web-2", At: now.Add(-30 * time.Minute), Version: "a1b2c3d"},
+	} {
+		if err := store.storeLifecycleEvent(e); err != nil {
+			t.Fatalf("store lifecycle: %v", err)
+		}
+	}
+
+	got := deployAttribution(p, deployedAt.Add(25*time.Minute), "a1b2c3d")
+	if !strings.Contains(got, "25m0s after a1b2c3d was deployed") {
+		t.Errorf("want the deploy named, got %q", got)
+	}
+
+	// A restart of the same build is not a deploy, so the attribution is
+	// still measured from when the build first appeared.
+	if got = deployAttribution(p, now.Add(-10*time.Minute), "a1b2c3d"); !strings.Contains(got, "1h20m0s") {
+		t.Errorf("attribution should run from the first start of the build, got %q", got)
+	}
+
+	if got = deployAttribution(p, deployedAt.Add(-time.Hour), "a1b2c3d"); got != "" {
+		t.Errorf("a regression that predates the build should blame nothing, got %q", got)
+	}
+	if got = deployAttribution(p, deployedAt.Add(deployWindow+time.Hour), "a1b2c3d"); got != "" {
+		t.Errorf("a regression a day after the deploy should blame nothing, got %q", got)
+	}
+	if got = deployAttribution(p, deployedAt.Add(time.Minute), ""); got != "" {
+		t.Errorf("an unknown build should blame nothing, got %q", got)
+	}
+	if got = deployAttribution(p, deployedAt.Add(time.Minute), "never-ran"); got != "" {
+		t.Errorf("a build with no start event should blame nothing, got %q", got)
+	}
+}

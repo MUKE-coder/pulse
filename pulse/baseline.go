@@ -494,6 +494,39 @@ func (w *regressionWatcher) evaluate() {
 	}
 }
 
+// deployWindow bounds how long after a deploy a regression can still be
+// blamed on it. Beyond a day the two are just both true.
+const deployWindow = 24 * time.Hour
+
+// deployAttribution names the build a regression began under, when it began
+// soon enough after that build was deployed to be its doing. A step change
+// right after a deploy is a release that got slower, which is a different
+// investigation from one that crept up over a month.
+func deployAttribution(p *Pulse, started time.Time, version string) string {
+	ls, ok := p.storage.(lifecycleStore)
+	if !ok || version == "" {
+		return ""
+	}
+	// When this build first started is when it was deployed; starts of the
+	// same build after that are restarts.
+	events, err := ls.lifecycleEvents(TimeRange{Start: started.Add(-30 * 24 * time.Hour), End: p.now()})
+	if err != nil {
+		return ""
+	}
+	for _, e := range events { // oldest first
+		if e.Type != lifecycleStart || e.Version != version {
+			continue
+		}
+		since := started.Sub(e.At)
+		if since < 0 || since > deployWindow {
+			return "" // the regression predates this build, or long outlives its deploy
+		}
+		return fmt.Sprintf(", which began %s after %s was deployed",
+			since.Round(time.Minute), version)
+	}
+	return ""
+}
+
 // fire announces a sustained regression. The message carries the numbers
 // someone needs to decide whether to roll back: how much slower, measured
 // against what, for how long.
@@ -509,9 +542,10 @@ func (w *regressionWatcher) fire(key rollupRouteKey, b routeBaseline, started, n
 		Severity:  "warning",
 		State:     AlertStateFiring,
 		Route:     route,
-		Message: fmt.Sprintf("%s is %.1f× slower than usual: p95 %s against a %s baseline over %d hours, for the last %s",
+		Message: fmt.Sprintf("%s is %.1f× slower than usual: p95 %s against a %s baseline over %d hours, for the last %s%s",
 			route, b.Ratio, latencyText(b.Current), latencyText(b.Baseline), b.Hours,
-			now.Sub(started).Round(time.Minute)),
+			now.Sub(started).Round(time.Minute),
+			deployAttribution(w.pulse, started, buildVersion(collectSystemInfo()))),
 		FiredAt: now,
 	}
 

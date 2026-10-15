@@ -702,7 +702,9 @@ Every hour, each route's traffic is summarised to a handful of numbers — count
 
 The Routes page gets a **vs usual** column (+180% in red when a route is well off its baseline), `GET /pulse/api/routes/baselines` serves the comparison, and a route that stays above its baseline for an hour fires a `route_regression` alert through the same channels as everything else:
 
-> `GET /checkout is 2.4× slower than usual: p95 240ms against a 100ms baseline over 142 hours, for the last 1h0m0s`
+> `GET /checkout is 2.4× slower than usual: p95 240ms against a 100ms baseline over 142 hours, for the last 1h0m0s, which began 12m0s after a1b2c3d was deployed`
+
+That last clause is the deploy markers doing their other job: when the slowdown began within a day of the running build's first start, the alert names the build, which turns "something got slower" into "this release got slower".
 
 It is on by default and costs one row per route per hour. Tune it if you want to:
 
