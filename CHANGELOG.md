@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-10-15
+
+A release about memory: Pulse's own, and the product's. Trace view, deploy
+markers, runtime profiles, per-route baselines and query plans — plus a
+40MB-per-process allocation regression in Pulse itself, found with the
+profiling endpoints this release adds. API changes are additive only.
+
 ### Added — why a slow query is slow
 
 - `WithExplainSlowQueries(interval)` asks the database for the plan of a
@@ -267,7 +274,7 @@ additive only.
 
 ---
 
-## [1.1.0] — Unreleased
+## [1.1.0] — 2026-10-06
 
 Minor release: the v1.1 part of the follow-up plan to the v1.0.0 code
 review. API changes are additive only (see "API additions"). Three default
@@ -430,7 +437,7 @@ exported identifier changed.
 
 ---
 
-## [1.0.1] — Unreleased
+## [1.0.1] — 2026-10-06
 
 Patch release fixing correctness and privacy bugs found in a code review of
 v1.0.0. No source-level API changes; one additive field
@@ -1026,6 +1033,10 @@ milestones:
   Batched writes for the SQLite backend (move per-call inserts behind a
   channel + worker pool).
 
+[1.3.0]: https://github.com/MUKE-coder/pulse/releases/tag/v1.3.0
+[1.2.0]: https://github.com/MUKE-coder/pulse/releases/tag/v1.2.0
+[1.1.0]: https://github.com/MUKE-coder/pulse/releases/tag/v1.1.0
+[1.0.1]: https://github.com/MUKE-coder/pulse/releases/tag/v1.0.1
 [1.0.0]: https://github.com/MUKE-coder/pulse/releases/tag/v1.0.0
 [0.5.0]: https://github.com/MUKE-coder/pulse/releases/tag/v0.5.0
 [0.4.0]: https://github.com/MUKE-coder/pulse/releases/tag/v0.4.0

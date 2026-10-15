@@ -1422,7 +1422,8 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. The short version
 |---------|-------|
 | `v1.1.0` | Batched SQLite writes; exact per-minute counts; SLO fixes; configurable redaction; storage-capacity alerts; restart markers; load-test comparison; health-check isolation |
 | `v1.2.0` | Shared storage (Postgres) with leader election; log capture and correlation; OpenTelemetry export |
-| `v1.3.0` | Anomaly detection |
+| `v1.3.0` | Trace view; deploy markers; runtime profiles (heap/CPU/mutex/block); per-route baselines with regression alerts; query plans for slow queries |
+| `v1.4.0` | Anomaly detection |
 
 ## License
 
