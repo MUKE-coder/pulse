@@ -586,6 +586,7 @@ func flushRollups(p *Pulse) {
 		refreshPeerRollups(p, store)
 	}
 	p.rollups.prune(now)
+	flushBaselines(p)
 }
 
 // startRollupFlusher flushes rollups on a tick, and once more on shutdown.

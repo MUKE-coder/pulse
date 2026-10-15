@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — a route that got slower (#8)
+
+- Per-route baselines: each hour, every route's traffic is summarised to
+  count, errors, p50, p95 and p99, and the summaries are kept for 30 days —
+  far longer than the request records they came from, because a regression
+  is something you notice over weeks. A route's baseline is the **median**
+  of its hourly p95s over a 7-day window, so one pathological hour can't
+  become the yardstick, and hours too quiet to be representative are left
+  out.
+- `GET /pulse/api/routes/baselines` serves what each route usually does
+  against the hour in progress, and the Routes page gains a **vs usual**
+  column: `+180%` in red when a route is well off its baseline, `—` while
+  it still lacks history.
+- A route that stays at or above `RegressionRatio` (default 1.5×) for
+  `For` (default 1h) fires a `route_regression` alert through the existing
+  channels: *"GET /checkout is 2.4× slower than usual: p95 240ms against a
+  100ms baseline over 142 hours, for the last 1h0m0s"*. It closes itself
+  when the route recovers, and on shared storage only the leader alerts, so
+  a cluster pages once.
+- Nothing is flagged without evidence: a route needs `MinHours` (6)
+  qualifying hours of history and `MinRequests` (20) in the hour in
+  progress, so a deploy that is slow for ten minutes, or a handful of slow
+  requests after a restart, can't page. Tune it all through
+  `BaselineConfig`, or turn it off with `Baselines.Enabled`.
+- One row per route per hour, on every backend. The Memory backend now
+  replaces a re-flushed hour instead of appending it, matching the SQL
+  upsert, so a retried flush can't double-count.
+
+### Added — `pulse.Bool`
+
+- The `*bool` config fields (the ones that tell "off" from "not set") had
+  no exported way to set them: the README's examples called the
+  unexported `boolPtr`. `pulse.Bool(false)` now does it.
+
+
 ### Added — the runtime's own profiles (#7)
 
 - `GET /pulse/api/profile/{heap,allocs,goroutine,mutex,block,threadcreate}`

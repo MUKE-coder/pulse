@@ -97,6 +97,10 @@ type Config struct {
 	// [Pulse.LogWriter].
 	Logs LogConfig
 
+	// Baselines configures per-route latency baselines, which is what lets
+	// Pulse say a route got slower rather than only that it is slow.
+	Baselines BaselineConfig
+
 	// DevMode enables verbose logging and more frequent aggregation.
 	DevMode bool
 
@@ -229,6 +233,77 @@ type LogConfig struct {
 	// handler or writer wrapped by SlogHandler or LogWriter still receives
 	// every line its own settings allow.
 	MinLevel slog.Level
+}
+
+// BaselineConfig configures per-route latency baselines. Every hour, each
+// route's latency is summarised to p50/p95/p99 and a request count; those
+// summaries are kept far longer than the request records, and a route's
+// baseline is the median of its hourly p95s over Window.
+type BaselineConfig struct {
+	// Enabled toggles baselines and the regression alert (default: true).
+	// The summaries cost a few hundred bytes per route per hour.
+	Enabled *bool
+	// Window is how far back a baseline is drawn (default: 7 days).
+	Window time.Duration
+	// Retention is how long hourly summaries are kept (default: 30 days).
+	// They are small enough to outlive the request records by a long way.
+	Retention time.Duration
+	// MinRequests is how many requests an hour needs before it counts
+	// towards a baseline, or is compared against one (default: 20).
+	MinRequests int64
+	// MinHours is how many qualifying hours a route needs before it has a
+	// baseline at all (default: 6).
+	MinHours int
+	// RegressionRatio is the multiple of its baseline a route's p95 must
+	// reach to count as regressed (default: 1.5).
+	RegressionRatio float64
+	// For is how long a regression must hold before it is alerted on
+	// (default: 1h), so one slow hour doesn't page anybody.
+	For time.Duration
+}
+
+// Defaults for BaselineConfig, applied by the baseline* helpers so a
+// zero-valued Config behaves like the documented one.
+func baselineWindow(c BaselineConfig) time.Duration {
+	if c.Window > 0 {
+		return c.Window
+	}
+	return 7 * 24 * time.Hour
+}
+
+func baselineRetention(c BaselineConfig) time.Duration {
+	if c.Retention > 0 {
+		return c.Retention
+	}
+	return 30 * 24 * time.Hour
+}
+
+func baselineMinRequests(c BaselineConfig) int64 {
+	if c.MinRequests > 0 {
+		return c.MinRequests
+	}
+	return 20
+}
+
+func baselineMinHours(c BaselineConfig) int {
+	if c.MinHours > 0 {
+		return c.MinHours
+	}
+	return 6
+}
+
+func baselineRatio(c BaselineConfig) float64 {
+	if c.RegressionRatio > 0 {
+		return c.RegressionRatio
+	}
+	return 1.5
+}
+
+func baselineFor(c BaselineConfig) time.Duration {
+	if c.For > 0 {
+		return c.For
+	}
+	return time.Hour
 }
 
 // TracingConfig configures request tracing.
@@ -609,6 +684,11 @@ func applyDefaults(cfg Config) Config {
 		cfg.Profiling.DebugHandlers = boolPtr(false)
 	}
 
+	// Baselines
+	if cfg.Baselines.Enabled == nil {
+		cfg.Baselines.Enabled = boolPtr(true)
+	}
+
 	return cfg
 }
 
@@ -620,8 +700,15 @@ func defaultInstanceID() string {
 	return "pulse"
 }
 
-func boolPtr(b bool) *bool {
+// Bool returns a pointer to b, for the Config fields that distinguish
+// "off" from "not set" — pulse.Bool(false) turns a feature that defaults to
+// on off, where leaving the field nil would leave it on.
+func Bool(b bool) *bool {
 	return &b
+}
+
+func boolPtr(b bool) *bool {
+	return Bool(b)
 }
 
 func boolValue(b *bool) bool {

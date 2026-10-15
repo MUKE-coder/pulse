@@ -20,7 +20,7 @@ import (
 var sqlTables = []string{
 	"requests", "queries", "runtime_samples", "errors", "health_results", "alerts",
 	"dependencies", "n1_detections", "test_runs", "request_rollups", "latency_rollups",
-	"slo_rollups", "pulse_meta", "lifecycle_events", "logs",
+	"slo_rollups", "pulse_meta", "lifecycle_events", "logs", "route_hours",
 }
 
 // tableRef matches a Pulse table name where a statement names a table.

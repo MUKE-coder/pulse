@@ -134,6 +134,9 @@ func newTracingMiddleware(p *Pulse) gin.HandlerFunc {
 		// Count every request before sampling, so totals, error rates and
 		// SLO compliance stay exact at any sample rate.
 		p.rollups.observe(c.Request.Method, c.FullPath(), routePattern, statusCode, latency, start)
+		if boolValue(p.config.Baselines.Enabled) {
+			p.baselines.observe(c.Request.Method, c.FullPath(), statusCode, latency, start)
+		}
 
 		// The request is done, so its N+1 tallies are final. Record them
 		// whether or not this request is sampled below.

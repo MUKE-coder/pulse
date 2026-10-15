@@ -37,6 +37,12 @@ type Pulse struct {
 	// rollups holds unsampled per-minute request tallies (see rollup.go).
 	rollups *rollups
 
+	// baselines summarise each route's latency hour by hour, so a route
+	// that got slower can be told from one that is simply slow (see
+	// baseline.go).
+	baselines   *baselines
+	regressions *regressionWatcher
+
 	// redactor strips secrets from captured request context, error
 	// messages and dependency URLs (see redact.go).
 	redactor *redactor
@@ -113,6 +119,7 @@ func newPulse(parent context.Context, cfg Config) *Pulse {
 		redactor:     newRedactor(cfg.Errors.Redaction),
 		exporter:     newExportPipeline(cfg.Exporters),
 		rollups:      newRollups(time.Duration(cfg.Storage.RetentionHours)*time.Hour, cfg.SLOs, time.Now()),
+		baselines:    newBaselines(time.Now()),
 		healthChecks: make([]HealthCheck, 0),
 		ctx:          ctx,
 		cancel:       cancel,

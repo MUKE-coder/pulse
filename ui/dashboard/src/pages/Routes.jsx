@@ -18,6 +18,7 @@ export default function RoutesPage() {
   const [range, setRange] = useState('1h')
   const [detail, setDetail] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [baselines, setBaselines] = useState({})
 
   const fetchRoutes = async () => {
     try {
@@ -29,7 +30,21 @@ export default function RoutesPage() {
     setLoading(false)
   }
 
+  // What each route usually does, so the table can say a route got slower
+  // rather than only that it is slow. Independent of the time range.
+  const fetchBaselines = async () => {
+    try {
+      const res = await get('/routes/baselines')
+      if (!res.ok) return
+      const data = await res.json()
+      const byRoute = {}
+      for (const b of data.baselines || []) byRoute[`${b.method} ${b.route}`] = b
+      setBaselines(byRoute)
+    } catch {}
+  }
+
   useEffect(() => { fetchRoutes() }, [range, search])
+  useEffect(() => { fetchBaselines() }, [])
 
   const fetchDetail = async (row) => {
     try {
@@ -55,6 +70,20 @@ export default function RoutesPage() {
     { key: 'p95_latency', label: 'P95', render: (v) => fmtDuration(v) },
     { key: 'p99_latency', label: 'P99', render: (v) => fmtDuration(v) },
     { key: 'rpm', label: 'RPM', render: (v) => v?.toFixed(1) },
+    { key: 'baseline', label: 'vs usual', render: (_, row) => {
+      const b = baselines[`${row.method} ${row.path}`]
+      if (!b || !b.ratio) {
+        return <span style={{ color: '#64748b' }} title="Not enough hours of history yet">—</span>
+      }
+      const pct = Math.round((b.ratio - 1) * 100)
+      const color = b.regressed ? '#ef4444' : pct <= -20 ? '#22c55e' : '#64748b'
+      return (
+        <span style={{ color, fontVariantNumeric: 'tabular-nums' }}
+          title={`p95 ${fmtDuration(b.current_p95)} against a ${fmtDuration(b.baseline_p95)} baseline over ${b.hours}h`}>
+          {pct > 0 ? '+' : ''}{pct}%
+        </span>
+      )
+    }},
     { key: 'trend', label: 'Trend', render: (v) => (
       <span style={{ color: v === 'up' ? '#22c55e' : v === 'down' ? '#ef4444' : '#64748b' }}>
         {v === 'up' ? '↑' : v === 'down' ? '↓' : '—'}

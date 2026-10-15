@@ -22,6 +22,7 @@ Pulse gives you full visibility into your application's HTTP requests, database 
   - [Error Tracking](#error-tracking)
   - [Health Checks](#health-checks)
   - [Alerting](#alerting)
+  - [Per-route baselines](#per-route-baselines)
   - [Prometheus](#prometheus)
   - [Log capture](#log-capture)
   - [OpenTelemetry and exporters](#opentelemetry-and-exporters)
@@ -50,6 +51,7 @@ Pulse gives you full visibility into your application's HTTP requests, database 
 - **Health Checks** — Pluggable health check system with Kubernetes-compatible endpoints (`/live`, `/ready`), composite status, and flapping detection.
 - **Alerting Engine** — Threshold-based rules with two-phase firing (prevents false alerts), cooldown periods, and multi-channel notifications (Slack, Discord, Email, Webhooks with HMAC signatures).
 - **SLOs with burn-rate alerts** — Multiwindow burn-rate alerting (Google SRE workbook), computed from exact per-minute counts of every request, so sampling never skews compliance. Survives restarts with the SQLite backend.
+- **Per-route baselines** — Each route's hourly p95 is summarised and kept for 30 days, so Pulse can say a route *got slower*, not just that it is slow. A sustained regression against the median of the last week pages once, with the numbers to decide on a rollback.
 - **Secret redaction** — Passwords, tokens, card numbers, JWTs and keys are stripped from captured request context, error messages and outbound URLs before anything is stored, whatever the field name or naming style. Configurable.
 - **Load-test overlay** — k6 (or any harness) runs appear as bands on the dashboard timelines, with a before/during/after comparison and time to recovery.
 - **Knows its own limits** — Alerts when buffer capacity rather than your retention setting limits history, when writes are dropped, and after an unclean restart. Pulse's own failures are counted and exported.
@@ -312,7 +314,7 @@ Without shared storage, pin each browser's dashboard traffic to one replica (sti
 
 ```go
 Tracing: pulse.TracingConfig{
-    Enabled:              boolPtr(true),    // default: true
+    Enabled:              pulse.Bool(true),    // default: true
     SlowRequestThreshold: 500 * time.Millisecond,  // default: 1s
     SampleRate:           float64Ptr(0.5),  // 50% sampling (default: 1.0 = 100%)
     ExcludePaths:         []string{"/healthz", "/metrics"},  // glob patterns
@@ -327,11 +329,11 @@ If an inbound request already carries a valid `traceparent`, Pulse adopts the up
 
 ```go
 Database: pulse.DatabaseConfig{
-    Enabled:            boolPtr(true),       // default: true
+    Enabled:            pulse.Bool(true),       // default: true
     SlowQueryThreshold: 100 * time.Millisecond,  // default: 200ms
-    DetectN1:           boolPtr(true),       // default: true
+    DetectN1:           pulse.Bool(true),       // default: true
     N1Threshold:        5,                   // repeated patterns to flag (default: 5)
-    TrackCallers:       boolPtr(true),       // capture file:line (default: true)
+    TrackCallers:       pulse.Bool(true),       // capture file:line (default: true)
 },
 ```
 
@@ -345,7 +347,7 @@ Pulse registers a GORM plugin that hooks into Create, Query, Update, Delete, Row
 
 ```go
 Runtime: pulse.RuntimeConfig{
-    Enabled:        boolPtr(true),  // default: true
+    Enabled:        pulse.Bool(true),  // default: true
     SampleInterval: 5 * time.Second,  // default: 5s
     LeakThreshold:  100,            // goroutines/hour growth (default: 100)
 },
@@ -357,9 +359,9 @@ Sampled metrics: `HeapAlloc`, `HeapInUse`, `HeapObjects`, `StackInUse`, `TotalAl
 
 ```go
 Errors: pulse.ErrorConfig{
-    Enabled:            boolPtr(true),  // default: true
-    CaptureStackTrace:  boolPtr(true),  // default: true
-    CaptureRequestBody: boolPtr(true),  // default: true
+    Enabled:            pulse.Bool(true),  // default: true
+    CaptureStackTrace:  pulse.Bool(true),  // default: true
+    CaptureRequestBody: pulse.Bool(true),  // default: true
     MaxBodySize:        4096,           // bytes (default: 4096)
 },
 ```
@@ -393,7 +395,7 @@ pulse.Mount(ctx, router, db,
 
 ```go
 Health: pulse.HealthConfig{
-    Enabled:       boolPtr(true),       // default: true
+    Enabled:       pulse.Bool(true),       // default: true
     CheckInterval: 30 * time.Second,    // default: 30s
     Timeout:       10 * time.Second,    // default: 10s
 },
@@ -452,7 +454,7 @@ These answer from the latest results held in memory, so they keep working when P
 
 ```go
 Alerts: pulse.AlertConfig{
-    Enabled:  boolPtr(true),           // default: true
+    Enabled:  pulse.Bool(true),           // default: true
     Cooldown: 15 * time.Minute,        // re-fire cooldown (default: 15m)
 
     // Custom rules (merged with built-in defaults)
@@ -692,6 +694,32 @@ SLOs are computed from exact per-minute counts of every request, so sampling doe
 
 **Why burn rate, not raw error rate?** A 0.5% error rate is catastrophic for a 99.99% SLO (50× burn) and unremarkable for a 90% SLO (0.05× burn). Same number, totally different meaning. Burn rate normalises against the SLO you actually care about.
 
+### Per-route baselines
+
+Pulse can tell you a route is slow. Baselines are what let it tell you a route *got* slower.
+
+Every hour, each route's traffic is summarised to a handful of numbers — count, errors, p50, p95, p99 — and those summaries are kept for 30 days, far longer than the request records they came from, because a regression is something you notice over weeks. A route's baseline is the **median of its hourly p95s** over the window: a median so one pathological hour doesn't become the yardstick, and hours too quiet to be representative are left out entirely.
+
+The Routes page gets a **vs usual** column (+180% in red when a route is well off its baseline), `GET /pulse/api/routes/baselines` serves the comparison, and a route that stays above its baseline for an hour fires a `route_regression` alert through the same channels as everything else:
+
+> `GET /checkout is 2.4× slower than usual: p95 240ms against a 100ms baseline over 142 hours, for the last 1h0m0s`
+
+It is on by default and costs one row per route per hour. Tune it if you want to:
+
+```go
+Baselines: pulse.BaselineConfig{
+    Enabled:         pulse.Bool(true),      // default: true
+    Window:          7 * 24 * time.Hour,    // hours the baseline is drawn from (default: 7d)
+    Retention:       30 * 24 * time.Hour,   // how long summaries are kept (default: 30d)
+    MinRequests:     20,                    // an hour quieter than this isn't evidence (default: 20)
+    MinHours:        6,                     // hours needed before a route has a baseline at all (default: 6)
+    RegressionRatio: 1.5,                   // flag at 1.5× the baseline p95 (default: 1.5)
+    For:             time.Hour,             // ...sustained this long before it pages (default: 1h)
+},
+```
+
+Nothing is flagged before there is evidence for it: a route needs `MinHours` qualifying hours of history, the hour in progress needs `MinRequests` requests, and the slowdown has to last `For`. A deploy that is slow for ten minutes and recovers won't page; one that is slow for an hour will, once, and the alert closes itself when the route comes back. On shared storage the leader alerts, so a cluster pages once rather than once per instance.
+
 ### Prometheus
 
 ```go
@@ -930,6 +958,7 @@ All endpoints under `/pulse/api/` require JWT authentication (except login).
 |--------|----------|--------------|-------------|
 | `GET` | `/pulse/api/routes` | `?range=1h&search=users` | List all routes with stats |
 | `GET` | `/pulse/api/routes/:method/*path` | `?range=1h` | Detailed route info |
+| `GET` | `/pulse/api/routes/baselines` | — | Each route's usual p95 against the hour in progress |
 
 ### Database
 

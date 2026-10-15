@@ -51,6 +51,10 @@ type MemoryStorage struct {
 	lifecycle   []lifecycleEvent
 	lifecycleMu sync.Mutex
 
+	// Hourly per-route latency summaries; see baseline.go.
+	routeHours   []storedRouteHour
+	routeHoursMu sync.Mutex
+
 	// Captured log lines, allocated on first use; see logs.go.
 	logs        atomic.Pointer[RingBuffer[LogRecord]]
 	logCapacity int
@@ -896,6 +900,10 @@ func (s *MemoryStorage) Reset() error {
 	s.testRunsMu.Lock()
 	s.testRuns = nil
 	s.testRunsMu.Unlock()
+
+	s.routeHoursMu.Lock()
+	s.routeHours = nil
+	s.routeHoursMu.Unlock()
 
 	return nil
 }

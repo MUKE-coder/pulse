@@ -460,6 +460,20 @@ CREATE TABLE IF NOT EXISTS logs (
 CREATE INDEX IF NOT EXISTS idx_logs_ts    ON logs (timestamp);
 CREATE INDEX IF NOT EXISTS idx_logs_trace ON logs (trace_id, timestamp);
 
+CREATE TABLE IF NOT EXISTS route_hours (
+	instance_id TEXT    NOT NULL DEFAULT '',
+	hour        INTEGER NOT NULL,
+	method      TEXT    NOT NULL,
+	route       TEXT    NOT NULL,
+	count       INTEGER NOT NULL,
+	errors      INTEGER NOT NULL DEFAULT 0,
+	p50_ns      INTEGER NOT NULL DEFAULT 0,
+	p95_ns      INTEGER NOT NULL DEFAULT 0,
+	p99_ns      INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (instance_id, hour, method, route)
+);
+CREATE INDEX IF NOT EXISTS idx_route_hours_hour ON route_hours (hour);
+
 CREATE TABLE IF NOT EXISTS slo_rollups (
 	minute INTEGER NOT NULL,
 	slo    TEXT    NOT NULL,
@@ -1553,7 +1567,7 @@ func (s *sqlStore) Reset() error {
 
 	tables := []string{"requests", "queries", "runtime_samples", "errors",
 		"health_results", "alerts", "dependencies", "n1_detections", "test_runs",
-		"request_rollups", "latency_rollups", "slo_rollups", "logs"}
+		"request_rollups", "latency_rollups", "slo_rollups", "logs", "route_hours"}
 	for _, t := range tables {
 		if _, err := s.exec(`DELETE FROM ` + t); err != nil {
 			return fmt.Errorf("pulse/sqlite reset %s: %w", t, err)

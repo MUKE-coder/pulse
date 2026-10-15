@@ -180,6 +180,13 @@ func Mount(ctx context.Context, router *gin.Engine, db *gorm.DB, opts ...Option)
 		p.sloEvaluator.start()
 	}
 
+	// Watch each route against its own baseline, so a route that got slower
+	// is noticed even while it stays inside every absolute threshold.
+	if boolValue(cfg.Baselines.Enabled) {
+		p.regressions = newRegressionWatcher(p)
+		p.regressions.start()
+	}
+
 	// With storage shared by several instances, elect the one that runs
 	// application-wide alerting and retention. Started after the alert
 	// engine and SLO evaluator, which a new leader hands open alerts to.

@@ -125,6 +125,7 @@ func registerAPIRoutes(router *gin.Engine, p *Pulse) {
 
 	// Routes
 	protected.GET("/routes", routesListHandler(p))
+	protected.GET("/routes/baselines", routeBaselinesHandler(p))
 	protected.GET("/routes/:method/*path", routeDetailHandler(p))
 
 	// Database
