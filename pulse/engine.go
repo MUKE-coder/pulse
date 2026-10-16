@@ -66,6 +66,11 @@ type Pulse struct {
 	// GORM plugin
 	gormPlugin *PulsePlugin
 
+	// dbName is the monitored database's name, asked for once (see
+	// monitoredDatabase).
+	dbName     string
+	dbNameOnce sync.Once
+
 	// explainer asks the database for the plans of slow queries; nil unless
 	// Database.ExplainSlowQueries is on (see explain.go).
 	explainer *explainer

@@ -3,6 +3,7 @@ import { Area, AreaChart, CartesianGrid, ReferenceLine, ResponsiveContainer, Too
 import { useAPI } from '../hooks/useAPI'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useTheme } from '../hooks/useTheme'
+import { useUI } from '../context/UIContext'
 import { Empty, KVs, Meter, Panel, Section, StatTile } from '../components/ops'
 import Topology from '../components/Topology'
 
@@ -10,7 +11,6 @@ import Topology from '../components/Topology'
 // requests, the database, the services it calls, and what is firing or being
 // logged — each panel reading from the endpoints Pulse already serves.
 
-const RANGES = ['15m', '1h', '6h', '24h']
 
 const paths = (range) => ({
   overview: `/overview?range=${range}`,
@@ -87,16 +87,16 @@ function TimeChart({ data, color, palette, format = (v) => v, short, markers = [
           </defs>
           <CartesianGrid stroke={palette.grid} vertical={false} />
           <XAxis dataKey="ts" type="number" domain={['dataMin', 'dataMax']} scale="time"
-            tickFormatter={clock} tick={{ fill: palette.ink3, fontSize: 10 }}
-            axisLine={{ stroke: palette.line }} tickLine={false} minTickGap={40} />
-          <YAxis tick={{ fill: palette.ink3, fontSize: 10 }} axisLine={false} tickLine={false}
+            tickFormatter={clock} tick={{ fill: palette.text3, fontSize: 10 }}
+            axisLine={{ stroke: palette.border }} tickLine={false} minTickGap={40} />
+          <YAxis tick={{ fill: palette.text3, fontSize: 10 }} axisLine={false} tickLine={false}
             width={44} tickFormatter={format} />
           <Tooltip labelFormatter={clock} formatter={(v) => [format(v), '']} separator=""
-            contentStyle={{ background: palette.surface, border: `1px solid ${palette.line}`,
-              borderRadius: 8, fontSize: 12, color: palette.ink }} />
+            contentStyle={{ background: palette.surface, border: `1px solid ${palette.border}`,
+              borderRadius: 8, fontSize: 12, color: palette.text }} />
           {markers.map((m) => (
-            <ReferenceLine key={m.at} x={m.at} stroke={palette.ink3} strokeDasharray="3 3"
-              label={{ value: m.label, position: 'insideTopRight', fill: palette.ink3, fontSize: 10 }} />
+            <ReferenceLine key={m.at} x={m.at} stroke={palette.text3} strokeDasharray="3 3"
+              label={{ value: m.label, position: 'insideTopRight', fill: palette.text3, fontSize: 10 }} />
           ))}
           <Area type="monotone" dataKey="v" stroke={color} strokeWidth={1.8} fill={`url(#${id})`}
             dot={false} isAnimationActive={false} />
@@ -108,9 +108,9 @@ function TimeChart({ data, color, palette, format = (v) => v, short, markers = [
 
 export default function Dashboard() {
   const { get } = useAPI()
-  const { dark, palette, toggle } = useTheme()
-  const [range, setRange] = useState('1h')
-  const [paused, setPaused] = useState(false)
+  const { palette } = useTheme()
+  const { range, live } = useUI()
+  const paused = !live
   const [data, setData] = useState({})
   const [loading, setLoading] = useState(true)
   const [tail, setTail] = useState([])
@@ -197,14 +197,6 @@ export default function Dashboard() {
         <span className={`ops-live${paused ? ' paused' : ''}`}>
           <i />{paused ? 'Paused' : 'Live, 10s'}
         </span>
-        <span className="ops-spacer" />
-        <div className="ops-seg" role="group" aria-label="Time range">
-          {RANGES.map((r) => (
-            <button key={r} aria-pressed={r === range} onClick={() => setRange(r)}>{r}</button>
-          ))}
-        </div>
-        <button className="ops-btn" onClick={() => setPaused((p) => !p)}>{paused ? 'Resume' : 'Pause'}</button>
-        <button className="ops-btn" onClick={toggle} aria-label="Toggle theme">{dark ? 'Light' : 'Dark'}</button>
       </header>
 
       <p className="ops-status">
@@ -248,7 +240,7 @@ export default function Dashboard() {
           series={lastValues(o.throughput_series)} delta={trafficDelta?.text} deltaTone={trafficDelta?.tone} />
         <StatTile label="Latency, p95" value={ms(o.p95_latency)} color={palette.accent}
           delta={`avg ${ms(o.avg_latency)}`} />
-        <StatTile label="Error rate" value={pct(o.error_rate)} color={palette.bad}
+        <StatTile label="Error rate" value={pct(o.error_rate)} color={palette.crit}
           series={lastValues(o.error_series)} delta={errorDelta?.text} deltaTone={errorDelta?.tone} />
         <StatTile label="Saturation" color={palette.warn} delta={`heap ${bytes(o.heap_alloc_mb)}`}
           value={pool && pool.max_open_connections > 0 ? `${poolUse.toFixed(0)}%` : num(o.active_goroutines)}
@@ -265,7 +257,7 @@ export default function Dashboard() {
             markers={deploys} />
         </Panel>
         <Panel title="Errors" now={pct(o.error_rate)} width="w6">
-          <TimeChart data={errorSeries} color={palette.bad} palette={palette} format={(v) => num(v)} />
+          <TimeChart data={errorSeries} color={palette.crit} palette={palette} format={(v) => num(v)} />
         </Panel>
         <Panel title="Saturation" width="w4">
           <Meter label="Goroutines, of 1,000" value={num(o.active_goroutines)}

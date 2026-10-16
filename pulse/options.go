@@ -356,6 +356,14 @@ func WithProfiling() Option {
 	return func(c *Config) { c.Profiling.Enabled = boolPtr(true) }
 }
 
+// WithPublicStatus serves <prefix>/api/public/status without
+// authentication: whether the service is up, how long it has been up and
+// its p95 latency, which is what the login screen's status cards show.
+// Off by default — with it off those cards stay blank rather than fake.
+func WithPublicStatus() Option {
+	return func(c *Config) { c.Dashboard.PublicStatus = Bool(true) }
+}
+
 // WithExplainSlowQueries asks the database for the plan of a slow SELECT —
 // at most one per query pattern per interval (zero means the default hour),
 // on a background goroutine. It issues extra read-only queries against your

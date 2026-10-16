@@ -1,200 +1,449 @@
-import { useState, useEffect } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
+import { Download, Play, Database as DatabaseIcon, FileSearch } from 'lucide-react'
 import { useAPI } from '../hooks/useAPI'
-import StatCard from '../components/StatCard'
-import DataTable from '../components/DataTable'
+import { useUI, usePolling, rangeSeconds } from '../context/UIContext'
+import { KpiTile, Delta, Tabs, EmptyState, PageHead, Severity } from '../components/ui'
 
-// traceLink links a query to the log lines of the request that ran it.
-const traceLink = (v) => v ? (
-  <Link to={`/pulse/ui/traces/${v}`} title="This request, end to end"
-    style={{ color: '#818cf8', fontSize: 11, fontFamily: "'SF Mono', monospace" }}>
-    {v.substring(0, 12)}…
-  </Link>
-) : null
+const ms = (ns) => (ns === undefined || ns === null ? '—' : `${(ns / 1e6).toFixed(ns < 1e6 ? 2 : ns < 1e8 ? 1 : 0)}ms`)
+const num = (v) => (v === undefined || v === null ? '—' : Number(v).toLocaleString())
+
+// Note on sparklines: the slow-query list and the N+1 rankings are top-N
+// samples rather than time series, so this page carries windows, deltas and
+// context instead of drawing a shape that would not mean anything. The
+// Overview, which does have per-minute series, draws them.
+
+// The N+1 severity bands the design uses, measured on added latency.
+function n1Severity(addedNs) {
+  const added = addedNs / 1e6
+  if (added > 300) return 'critical'
+  if (added >= 100) return 'warning'
+  return 'low'
+}
+
+function sinceText(iso) {
+  const then = new Date(iso).getTime()
+  if (!isFinite(then)) return '—'
+  const secs = Math.max(0, Math.round((Date.now() - then) / 1000))
+  if (secs < 60) return `${secs} s ago`
+  if (secs < 3600) return `${Math.round(secs / 60)} min ago`
+  if (secs < 86400) return `${Math.round(secs / 3600)} h ago`
+  return `${Math.round(secs / 86400)} d ago`
+}
 
 export default function DatabasePage() {
-  const { get } = useAPI()
+  const { get, post, request } = useAPI()
+  const { range, windowLabel, rangeLabel } = useUI()
   const [overview, setOverview] = useState(null)
+  const [previous, setPrevious] = useState(null)
   const [slowQueries, setSlowQueries] = useState([])
   const [patterns, setPatterns] = useState([])
   const [n1, setN1] = useState([])
-  const [pool, setPool] = useState(null)
   const [plans, setPlans] = useState(null)
-  const [tab, setTab] = useState('slow')
+  const [pool, setPool] = useState(null)
+  const [poolSeen, setPoolSeen] = useState(null)
+  const [tab, setTab] = useState('n1')
   const [loading, setLoading] = useState(true)
+  const [explaining, setExplaining] = useState(false)
+  const [notice, setNotice] = useState(null)
 
-  useEffect(() => {
-    const load = async () => {
-      try {
-        const [oRes, sRes, pRes, nRes, poolRes, planRes] = await Promise.all([
-          get('/database/overview?range=1h'),
-          get('/database/slow-queries?limit=50'),
-          get('/database/patterns?range=1h'),
-          get('/database/n1?range=1h'),
-          get('/database/pool'),
-          get('/database/plans?limit=50'),
-        ])
-        if (oRes.ok) setOverview(await oRes.json())
-        if (sRes.ok) setSlowQueries(await sRes.json())
-        if (pRes.ok) setPatterns(await pRes.json())
-        if (nRes.ok) setN1(await nRes.json())
-        if (poolRes.ok) setPool(await poolRes.json())
-        if (planRes.ok) setPlans(await planRes.json())
-      } catch {}
-      setLoading(false)
+  const load = useCallback(async () => {
+    const seconds = rangeSeconds(range)
+    try {
+      const [oRes, sRes, pRes, nRes, poolRes, planRes] = await Promise.all([
+        get(`/database/overview?range=${range}`),
+        get(`/database/slow-queries?limit=100`),
+        get(`/database/patterns?range=${range}`),
+        get(`/database/n1/ranked?range=${range}&limit=50`),
+        get('/database/pool'),
+        get('/database/plans?limit=50'),
+      ])
+      if (oRes.ok) setOverview(await oRes.json())
+      if (sRes.ok) setSlowQueries(await sRes.json())
+      if (pRes.ok) setPatterns(await pRes.json())
+      if (nRes.ok) {
+        const payload = await nRes.json()
+        setN1(Array.isArray(payload) ? payload : payload?.findings || [])
+      }
+      if (poolRes.ok) {
+        const stats = await poolRes.json()
+        setPool(stats)
+        // Remember the wait count at first sight, so "Rising" means it rose
+        // while you were watching rather than "is not zero".
+        setPoolSeen((seen) => (seen === null ? stats?.wait_count ?? 0 : seen))
+      }
+      if (planRes.ok) setPlans(await planRes.json())
+
+      // The window before this one, for an honest delta.
+      const end = new Date(Date.now() - seconds * 1000)
+      const prevRes = await get(`/database/overview?range=${range}&end=${end.toISOString()}`)
+      if (prevRes.ok) setPrevious(await prevRes.json())
+    } catch {}
+    setLoading(false)
+  }, [get, range])
+
+  usePolling(load, 15000, [load])
+
+  const runExplain = async () => {
+    setExplaining(true)
+    setNotice(null)
+    try {
+      const res = await post('/database/explain')
+      const data = await res.json()
+      if (!res.ok) setNotice(data.hint || data.error || 'EXPLAIN is unavailable')
+      else if (data.explained) {
+        setNotice(`Captured the plan for ${data.query}`)
+        setTab('plans')
+      } else {
+        // Armed, or nothing to explain yet: either way say what happens next.
+        setNotice(data.message)
+        if (data.armed) setTab('plans')
+      }
+      const planRes = await get('/database/plans?limit=50')
+      if (planRes.ok) setPlans(await planRes.json())
+    } catch (err) {
+      setNotice(String(err.message || err))
     }
-    load()
-  }, [])
+    setExplaining(false)
+  }
 
-  const slowCols = [
-    { key: 'operation', label: 'Op', render: (v) => (
-      <span style={{ color: '#818cf8', fontWeight: 600, textTransform: 'uppercase', fontSize: 11 }}>{v}</span>
-    )},
-    { key: 'table', label: 'Table' },
-    { key: 'duration', label: 'Duration', render: (v) => (
-      <span style={{ color: v > 500e6 ? '#ef4444' : v > 200e6 ? '#f59e0b' : '#e2e8f0' }}>
-        {(v / 1e6).toFixed(1)}ms
-      </span>
-    )},
-    { key: 'rows_affected', label: 'Rows' },
-    { key: 'caller_file', label: 'Caller', render: (v, row) => (
-      <span style={{ color: '#64748b', fontSize: 12 }}>{v}{row.caller_line > 0 ? `:${row.caller_line}` : ''}</span>
-    )},
-    { key: 'sql', label: 'SQL', render: (v) => (
-      <span style={{
-        maxWidth: 300, display: 'inline-block', overflow: 'hidden',
-        textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#94a3b8', fontSize: 12,
-        fontFamily: "'SF Mono', 'Fira Code', monospace",
-      }}>{v}</span>
-    )},
-    { key: 'request_trace_id', label: 'Request', render: traceLink },
-  ]
+  const exportCSV = async () => {
+    try {
+      const res = await request('/data/export', {
+        method: 'POST',
+        body: { format: 'csv', type: 'queries', range },
+      })
+      if (!res.ok) return setNotice('Export failed')
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `pulse-queries-${range}.csv`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      setNotice(String(err.message || err))
+    }
+  }
 
-  const patternCols = [
-    { key: 'operation', label: 'Operation', render: (v) => (
-      <span style={{ color: '#818cf8', fontWeight: 600, textTransform: 'uppercase', fontSize: 11 }}>{v}</span>
-    )},
-    { key: 'table', label: 'Table' },
-    { key: 'count', label: 'Count', render: (v) => v?.toLocaleString() },
-    { key: 'avg_duration', label: 'Avg Duration', render: (v) => `${(v / 1e6).toFixed(1)}ms` },
-    { key: 'max_duration', label: 'Max', render: (v) => `${(v / 1e6).toFixed(1)}ms` },
-    { key: 'total_duration', label: 'Total Time', render: (v) => `${(v / 1e6).toFixed(0)}ms` },
-  ]
+  const topPattern = useMemo(() => {
+    if (!patterns?.length) return null
+    return [...patterns].sort((a, b) => (b.count || 0) - (a.count || 0))[0]
+  }, [patterns])
+  const slowP95 = useMemo(() => {
+    if (!slowQueries?.length) return null
+    const sorted = slowQueries.map((q) => q.duration).sort((a, b) => a - b)
+    return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))]
+  }, [slowQueries])
 
-  const n1Cols = [
-    { key: 'pattern', label: 'SQL Pattern', render: (v) => (
-      <span style={{ fontFamily: "'SF Mono', 'Fira Code', monospace", fontSize: 12, color: '#f59e0b' }}>{v}</span>
-    )},
-    { key: 'count', label: 'Repetitions', render: (v) => (
-      <span style={{ color: '#ef4444', fontWeight: 700 }}>{v}x</span>
-    )},
-    { key: 'request_trace_id', label: 'Trace ID', render: traceLink },
-  ]
+  const n1Routes = useMemo(() => new Set(n1.map((d) => d.route).filter(Boolean)).size, [n1])
+  const n1Count = overview?.n1_count ?? n1.length
+  const poolMax = pool?.max_open_connections || 0
+  // Without a configured maximum the bar shows the split of what is open.
+  const poolScale = poolMax || pool?.open_connections || 0
+  const waitRising = pool && poolSeen !== null && (pool.wait_count || 0) > poolSeen
 
   const tabs = [
-    { id: 'slow', label: 'Slow Queries', count: slowQueries?.length },
-    { id: 'patterns', label: 'Patterns', count: patterns?.length },
-    { id: 'n1', label: 'N+1 Detections', count: n1?.length },
-    { id: 'plans', label: 'Query Plans', count: plans?.plans?.length },
+    { id: 'slow', label: 'Slow queries', count: slowQueries?.length || 0 },
+    { id: 'patterns', label: 'Patterns', count: patterns?.length || 0 },
+    { id: 'n1', label: 'N+1 detections', count: n1Count, tone: n1Count > 0 ? 'crit' : undefined },
+    { id: 'plans', label: 'Query plans', count: plans?.plans?.length ?? null },
   ]
 
-  if (loading) return <div style={{ color: '#64748b', padding: 40 }}>Loading...</div>
+  if (loading) return <div className="muted" style={{ padding: 40 }}>Loading…</div>
+
+  const subtitle = [
+    overview?.engine ? overview.engine[0].toUpperCase() + overview.engine.slice(1) : null,
+    overview?.database || null,
+    `captured ${num(overview?.total_queries)} queries in the ${rangeLabel.toLowerCase()}`,
+  ].filter(Boolean).join(' · ')
 
   return (
-    <div>
-      <h1 style={{ fontSize: 22, fontWeight: 700, marginBottom: 16 }}>Database</h1>
+    <>
+      <PageHead
+        title="Database"
+        subtitle={subtitle}
+        actions={
+          <>
+            <button type="button" className="btn" onClick={exportCSV}>
+              <Download size={15} strokeWidth={1.5} aria-hidden="true" /> Export CSV
+            </button>
+            <button type="button" className="btn btn-primary" onClick={runExplain} disabled={explaining}>
+              <Play size={15} strokeWidth={2} aria-hidden="true" />
+              {explaining ? 'Running…' : 'Run EXPLAIN'}
+            </button>
+          </>
+        }
+      />
 
-      {/* KPI Cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14, marginBottom: 20 }}>
-        <StatCard label="Total Queries" value={overview?.total_queries?.toLocaleString() || '0'} color="#818cf8" />
-        <StatCard label="Query Patterns" value={overview?.pattern_count || '0'} color="#22c55e" />
-        <StatCard label="Slow Queries" value={overview?.slow_query_count || '0'} color="#f59e0b" />
-        <StatCard label="N+1 Detected" value={overview?.n1_count || '0'} color={overview?.n1_count > 0 ? '#ef4444' : '#22c55e'} />
-      </div>
-
-      {/* Connection Pool */}
-      {pool && pool.open_connections !== undefined && (
-        <div style={{
-          background: '#111118', border: '1px solid #1e1e2e', borderRadius: 8,
-          padding: 16, marginBottom: 20,
-        }}>
-          <h3 style={{ fontSize: 13, color: '#64748b', fontWeight: 600, marginBottom: 10 }}>CONNECTION POOL</h3>
-          <div style={{ display: 'flex', gap: 24 }}>
-            <span style={{ fontSize: 13 }}><span style={{ color: '#64748b' }}>Open:</span> <span style={{ color: '#818cf8', fontWeight: 600 }}>{pool.open_connections}</span></span>
-            <span style={{ fontSize: 13 }}><span style={{ color: '#64748b' }}>In Use:</span> <span style={{ color: '#f59e0b', fontWeight: 600 }}>{pool.in_use}</span></span>
-            <span style={{ fontSize: 13 }}><span style={{ color: '#64748b' }}>Idle:</span> <span style={{ color: '#22c55e', fontWeight: 600 }}>{pool.idle}</span></span>
-            <span style={{ fontSize: 13 }}><span style={{ color: '#64748b' }}>Wait Count:</span> <span style={{ color: '#94a3b8' }}>{pool.wait_count}</span></span>
-          </div>
+      {notice ? (
+        <div className="card" role="status" style={{ padding: '10px 14px', fontSize: 13 }}>
+          <span className="muted">{notice}</span>
         </div>
-      )}
+      ) : null}
 
-      {/* Tabs */}
-      <div style={{ display: 'flex', gap: 4, marginBottom: 14 }}>
-        {tabs.map(({ id, label, count }) => (
-          <button key={id} onClick={() => setTab(id)} style={{
-            padding: '8px 16px', borderRadius: 6, border: 'none', fontSize: 13,
-            fontWeight: 600, cursor: 'pointer',
-            background: tab === id ? '#6366f120' : 'transparent',
-            color: tab === id ? '#818cf8' : '#64748b',
-          }}>
-            {label} {count > 0 && <span style={{ fontSize: 11, opacity: 0.7 }}>({count})</span>}
-          </button>
-        ))}
-      </div>
+      <section className="kpi-grid" aria-label="Database summary">
+        <KpiTile
+          label="Total queries" window={windowLabel}
+          value={num(overview?.total_queries)}
+          foot={<Delta current={overview?.total_queries || 0} previous={previous?.total_queries} />}
+        />
+        <KpiTile
+          label="Query patterns" window="distinct"
+          value={num(overview?.pattern_count)}
+          foot={topPattern
+            ? <span>Top pattern: <b>{topPattern.operation} {topPattern.table || ''}</b></span>
+            : <span className="muted">nothing captured yet</span>}
+        />
+        <KpiTile
+          label="Slow queries"
+          window={overview?.slow_threshold_ms ? `> ${overview.slow_threshold_ms} ms` : windowLabel}
+          value={num(overview?.slow_query_count)}
+          badge={overview?.slow_query_count === 0 ? { tone: 'ok', label: 'Healthy' } : undefined}
+          foot={slowP95 ? <span>p95 <b>{ms(slowP95)}</b></span> : <span className="muted">none in this window</span>}
+        />
+        <KpiTile
+          label="N+1 detected" window={windowLabel}
+          value={num(n1Count)}
+          tone={n1Count > 0 ? 'crit' : undefined}
+          badge={n1Count > 0 ? { tone: 'crit', label: 'Needs attention' } : { tone: 'ok', label: 'Clear' }}
+          foot={n1Count > 0
+            ? <span>across <b>{n1Routes}</b> {n1Routes === 1 ? 'route' : 'routes'}</span>
+            : <span className="muted">no repeated query patterns</span>}
+        />
+      </section>
 
-      {tab === 'slow' && <DataTable columns={slowCols} data={slowQueries || []} emptyText="No slow queries detected" />}
-      {tab === 'patterns' && <DataTable columns={patternCols} data={patterns || []} emptyText="No query patterns yet" />}
-      {tab === 'n1' && <DataTable columns={n1Cols} data={n1 || []} emptyText="No N+1 queries detected" />}
-      {tab === 'plans' && <QueryPlans data={plans} />}
-    </div>
-  )
-}
-
-// QueryPlans shows what the database said about each slow pattern. The plan
-// text is kept verbatim next to the hints, because a hint is a guess and
-// the plan is the evidence.
-function QueryPlans({ data }) {
-  if (!data?.supported) {
-    return <div style={{ color: '#64748b', padding: 24, fontSize: 13 }}>
-      This storage backend does not keep query plans.
-    </div>
-  }
-  if (!data.capturing && !(data.plans || []).length) {
-    return <div style={{ color: '#64748b', padding: 24, fontSize: 13, lineHeight: 1.7 }}>
-      Query plans are off. Mount Pulse with <code style={{ color: '#818cf8' }}>pulse.WithExplainSlowQueries(0)</code> and
-      Pulse will ask the database for the plan of a slow SELECT — at most one per query pattern per hour,
-      on a background goroutine. EXPLAIN only: the query is never run again.
-    </div>
-  }
-  if (!(data.plans || []).length) {
-    return <div style={{ color: '#64748b', padding: 24, fontSize: 13 }}>
-      Capturing. No slow query has needed a plan yet.
-    </div>
-  }
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      {data.plans.map((p) => (
-        <div key={p.normalized_sql} style={{
-          background: '#111118', border: '1px solid #1e1e2e', borderRadius: 8, padding: 14,
-        }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, marginBottom: 8 }}>
-            <code style={{ fontSize: 12, color: '#e2e8f0', wordBreak: 'break-all' }}>{p.normalized_sql}</code>
-            <span style={{ fontSize: 12, color: '#f59e0b', whiteSpace: 'nowrap' }}>
-              {(p.duration / 1e6).toFixed(1)}ms
-            </span>
+      {pool && pool.open_connections !== undefined ? (
+        <section className="card" aria-label="Connection pool"
+          style={{ display: 'flex', flexWrap: 'wrap', gap: 24, alignItems: 'center' }}>
+          <div style={{ flex: '1 1 320px', minWidth: 0 }}>
+            <div className="card-head" style={{ marginBottom: 10 }}>
+              <span className="card-title">Connection pool</span>
+              <span className="muted mono" style={{ fontSize: 12 }}>
+                {poolMax ? `${pool.open_connections} of ${poolMax} open` : `${pool.open_connections} open · no max set`}
+              </span>
+            </div>
+            <div className="bar" role="img"
+              aria-label={poolMax
+                ? `${pool.in_use} in use, ${pool.idle} idle, ${Math.max(0, poolMax - pool.open_connections)} free of ${poolMax}`
+                : `${pool.in_use} in use, ${pool.idle} idle, no maximum configured`}>
+              <span className="seg-in-use" style={{ width: `${poolScale ? (pool.in_use / poolScale) * 100 : 0}%` }} />
+              <span className="seg-idle" style={{ width: `${poolScale ? (pool.idle / poolScale) * 100 : 0}%` }} />
+            </div>
+            <div className="legend" style={{ marginTop: 10 }}>
+              <span><i className="swatch" style={{ background: 'var(--info)' }} /> In use</span>
+              <span><i className="swatch" style={{ background: 'var(--accent)' }} /> Idle</span>
+              <span><i className="swatch" style={{ background: 'var(--border)' }} /> Free</span>
+            </div>
           </div>
-          {(p.hints || []).map((h) => (
-            <div key={h} style={{ fontSize: 12, color: '#ef4444', marginBottom: 4 }}>{h}</div>
-          ))}
-          <pre style={{
-            margin: '8px 0 0', padding: 10, background: '#0b0b10', borderRadius: 6,
-            fontSize: 11, color: '#94a3b8', overflowX: 'auto', whiteSpace: 'pre-wrap',
-          }}>{p.plan}</pre>
-          <div style={{ fontSize: 11, color: '#64748b', marginTop: 6 }}>
-            captured {new Date(p.captured_at).toLocaleString()}
-          </div>
-        </div>
-      ))}
-    </div>
+
+          <dl className="readouts" style={{ flex: '1 1 380px' }}>
+            <div>
+              <dt className="eyebrow">Open</dt>
+              <dd className="value">{pool.open_connections}</dd>
+            </div>
+            <div>
+              <dt className="eyebrow">In use</dt>
+              <dd className="value">{pool.in_use}</dd>
+            </div>
+            <div>
+              <dt className="eyebrow">Idle</dt>
+              <dd className="value">{pool.idle}</dd>
+            </div>
+            <div>
+              <dt className="eyebrow">Wait count</dt>
+              <dd className={`value${waitRising ? ' warn' : ''}`}>
+                {pool.wait_count}
+                {waitRising ? <span className="badge badge-warn">Rising</span> : null}
+              </dd>
+            </div>
+          </dl>
+        </section>
+      ) : null}
+
+      <section className="section" aria-label="Query detail">
+        <Tabs tabs={tabs} active={tab} onChange={setTab} label="Database views" />
+
+        {tab === 'n1' ? (
+          n1.length ? (
+            <div className="table-wrap">
+              <div className="table-bar">
+                <span>
+                  <b>{n1.length}</b> grouped {n1.length === 1 ? 'finding' : 'findings'}
+                  {' · '}<b>{n1Count}</b> {n1Count === 1 ? 'detection' : 'detections'} in the window
+                </span>
+              </div>
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Route</th>
+                    <th scope="col">Repeated query</th>
+                    <th scope="col" className="num">Calls / req</th>
+                    <th scope="col" className="num">Added latency</th>
+                    <th scope="col">Last seen</th>
+                    <th scope="col">Severity</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {n1.map((d, i) => {
+                    const added = (d.avg_queries_per_hit || 0) * (d.avg_query_duration || 0)
+                    const level = n1Severity(added)
+                    return (
+                      <tr key={`${d.route}-${d.pattern}-${i}`}>
+                        <td className="mono">{d.route || '—'}</td>
+                        <td className="code" title={d.pattern}>{d.pattern}</td>
+                        <td className="num">{Math.round(d.avg_queries_per_hit || 0)}</td>
+                        <td className={`num ${level === 'critical' ? 'crit' : level === 'warning' ? 'warn' : 'muted'}`}>
+                          +{ms(added)}
+                        </td>
+                        <td className="muted">{sinceText(d.last_seen)}</td>
+                        <td><Severity level={level} /></td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <EmptyState
+              icon={<DatabaseIcon size={22} strokeWidth={1.5} aria-hidden="true" />}
+              title="No N+1 patterns in this window"
+              body="Pulse flags a query pattern that repeats inside one request. Nothing has repeated often enough in the selected range."
+            />
+          )
+        ) : null}
+
+        {tab === 'slow' ? (
+          slowQueries.length ? (
+            <div className="table-wrap">
+              <div className="table-bar">
+                <span>Slowest first · <b>{slowQueries.length}</b> captured</span>
+              </div>
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Op</th>
+                    <th scope="col">Table</th>
+                    <th scope="col" className="num">Duration</th>
+                    <th scope="col" className="num">Rows</th>
+                    <th scope="col">Caller</th>
+                    <th scope="col">SQL</th>
+                    <th scope="col">Trace</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {slowQueries.map((q, i) => (
+                    <tr key={`${q.request_trace_id}-${i}`}>
+                      <td className="mono">{q.operation}</td>
+                      <td>{q.table || '—'}</td>
+                      <td className={`num ${q.duration > 5e8 ? 'crit' : q.duration > 2e8 ? 'warn' : ''}`}>{ms(q.duration)}</td>
+                      <td className="num">{q.rows_affected ?? '—'}</td>
+                      <td className="muted mono" style={{ fontSize: 12 }}>
+                        {q.caller_file ? `${q.caller_file}${q.caller_line ? `:${q.caller_line}` : ''}` : '—'}
+                      </td>
+                      <td className="code" title={q.sql}>{q.sql}</td>
+                      <td className="mono">
+                        {q.request_trace_id
+                          ? <Link to={`/pulse/ui/traces/${q.request_trace_id}`}>{q.request_trace_id.slice(0, 8)}</Link>
+                          : '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <EmptyState
+              icon={<DatabaseIcon size={22} strokeWidth={1.5} aria-hidden="true" />}
+              title="No slow queries"
+              body={`Nothing has crossed the ${overview?.slow_threshold_ms ?? 200} ms slow threshold in this window.`}
+            />
+          )
+        ) : null}
+
+        {tab === 'patterns' ? (
+          patterns.length ? (
+            <div className="table-wrap">
+              <div className="table-bar"><span><b>{patterns.length}</b> distinct patterns</span></div>
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Op</th>
+                    <th scope="col">Table</th>
+                    <th scope="col">Query</th>
+                    <th scope="col" className="num">Count</th>
+                    <th scope="col" className="num">Avg</th>
+                    <th scope="col" className="num">Max</th>
+                    <th scope="col" className="num">Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {patterns.map((p, i) => (
+                    <tr key={`${p.normalized_sql}-${i}`}>
+                      <td className="mono">{p.operation}</td>
+                      <td>{p.table || '—'}</td>
+                      <td className="code" title={p.normalized_sql}>{p.normalized_sql}</td>
+                      <td className="num">{num(p.count)}</td>
+                      <td className="num">{ms(p.avg_duration)}</td>
+                      <td className="num">{ms(p.max_duration)}</td>
+                      <td className="num">{ms(p.total_duration)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <EmptyState
+              icon={<DatabaseIcon size={22} strokeWidth={1.5} aria-hidden="true" />}
+              title="No query patterns yet"
+              body="Pulse groups queries by their normalised SQL. Nothing has run in this window."
+            />
+          )
+        ) : null}
+
+        {tab === 'plans' ? (
+          plans?.plans?.length ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {plans.plans.map((plan) => (
+                <article className="card" key={plan.normalized_sql}>
+                  <div className="card-head" style={{ alignItems: 'flex-start' }}>
+                    <code className="mono" style={{ fontSize: 12, wordBreak: 'break-all' }}>
+                      {plan.normalized_sql}
+                    </code>
+                    <span className="mono warn" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+                      {ms(plan.duration)}
+                    </span>
+                  </div>
+                  {(plan.hints || []).map((hint) => (
+                    <div key={hint} className="crit" style={{ fontSize: 12, marginBottom: 4 }}>{hint}</div>
+                  ))}
+                  <pre className="mono" style={{
+                    margin: '8px 0 0', padding: 10, background: 'var(--bg-2)',
+                    borderRadius: 'var(--radius)', border: '1px solid var(--border)',
+                    fontSize: 11, color: 'var(--text-2)', overflowX: 'auto', whiteSpace: 'pre-wrap',
+                  }}>{plan.plan}</pre>
+                  <div className="meta" style={{ marginTop: 8 }}>
+                    captured {new Date(plan.captured_at).toLocaleString()}
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <EmptyState
+              icon={<FileSearch size={22} strokeWidth={1.5} aria-hidden="true" />}
+              title="No query plans yet"
+              body={plans?.capturing
+                ? `Pulse captures an EXPLAIN plan the first time a query crosses the ${overview?.slow_threshold_ms ?? 200} ms slow threshold. Nothing has crossed it in this window.`
+                : 'Query plans are off. Mount Pulse with pulse.WithExplainSlowQueries(0) and it will ask the database why a slow SELECT is slow — EXPLAIN only, one plan per pattern per hour.'}
+              action={plans?.capturing
+                ? <button type="button" className="btn btn-sm" onClick={runExplain} disabled={explaining}>
+                  Explain the slowest query now
+                </button>
+                : null}
+            />
+          )
+        ) : null}
+      </section>
+    </>
   )
 }

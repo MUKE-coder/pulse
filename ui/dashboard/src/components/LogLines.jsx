@@ -1,9 +1,9 @@
 import { Link } from 'react-router-dom'
 
-const levelColors = { DEBUG: '#64748b', INFO: '#818cf8', WARN: '#f59e0b', ERROR: '#ef4444' }
+const levelColors = { DEBUG: 'var(--text-3)', INFO: 'var(--accent)', WARN: 'var(--warn)', ERROR: 'var(--crit)' }
 
 // slog levels between the named ones read like "WARN+2".
-const levelColor = (level) => levelColors[String(level || 'INFO').replace(/[+-]\d+$/, '')] || '#94a3b8'
+const levelColor = (level) => levelColors[String(level || 'INFO').replace(/[+-]\d+$/, '')] || 'var(--text-2)'
 
 const clock = (t) => {
   const d = new Date(t)
@@ -11,7 +11,7 @@ const clock = (t) => {
 }
 
 const traceStyle = {
-  color: '#818cf8', fontSize: 11, whiteSpace: 'nowrap', background: 'none', border: 'none',
+  color: 'var(--accent)', fontSize: 11, whiteSpace: 'nowrap', background: 'none', border: 'none',
   padding: 0, cursor: 'pointer', fontFamily: 'inherit', textDecoration: 'none',
 }
 
@@ -20,24 +20,24 @@ const traceStyle = {
 // page.
 export default function LogLines({ logs, onTrace, emptyText = 'No log lines', maxHeight }) {
   if (!logs?.length) {
-    return emptyText ? <p style={{ color: '#64748b', fontSize: 13 }}>{emptyText}</p> : null
+    return emptyText ? <p style={{ color: 'var(--text-3)', fontSize: 13 }}>{emptyText}</p> : null
   }
   return (
     <div style={{
-      background: '#0a0a12', borderRadius: 6, border: '1px solid #1e1e2e', overflow: 'auto', maxHeight,
+      background: 'var(--bg)', borderRadius: 6, border: '1px solid var(--border)', overflow: 'auto', maxHeight,
       fontFamily: "'SF Mono', 'Fira Code', monospace", fontSize: 12, lineHeight: 1.6,
     }}>
       {logs.map((l, i) => (
         <div key={i} style={{
-          display: 'flex', gap: 10, padding: '3px 12px', borderBottom: '1px solid #13131d', alignItems: 'baseline',
+          display: 'flex', gap: 10, padding: '3px 12px', borderBottom: '1px solid var(--border)', alignItems: 'baseline',
         }}>
-          <span style={{ color: '#475569', whiteSpace: 'nowrap' }} title={new Date(l.time).toLocaleString()}>{clock(l.time)}</span>
+          <span style={{ color: 'var(--text-3)', whiteSpace: 'nowrap' }} title={new Date(l.time).toLocaleString()}>{clock(l.time)}</span>
           <span style={{ color: levelColor(l.level), fontWeight: 700, width: 64, flexShrink: 0 }}>{l.level}</span>
-          <span style={{ color: '#e2e8f0', whiteSpace: 'pre-wrap', wordBreak: 'break-word', flex: 1 }}>
+          <span style={{ color: 'var(--text)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', flex: 1 }}>
             {l.message}
             {l.attrs && Object.entries(l.attrs).map(([k, v]) => (
-              <span key={k} style={{ color: '#64748b', marginLeft: 10 }}>
-                {k}=<span style={{ color: '#94a3b8' }}>{v}</span>
+              <span key={k} style={{ color: 'var(--text-3)', marginLeft: 10 }}>
+                {k}=<span style={{ color: 'var(--text-2)' }}>{v}</span>
               </span>
             ))}
           </span>

@@ -27,6 +27,10 @@ const n1TraceIdleTTL = 5 * time.Minute
 type PulsePlugin struct {
 	pulse *Pulse
 
+	// db is the monitored database, kept so the Database page can name the
+	// engine it is watching and an on-demand EXPLAIN has somewhere to ask.
+	db *gorm.DB
+
 	// N+1 detection: per-request tallies of repeated query patterns, keyed
 	// by trace ID. Entries are removed when the trace is finalized.
 	n1Tracker   map[string]*n1Trace
@@ -55,6 +59,7 @@ func (p *PulsePlugin) Name() string {
 
 // Initialize registers callbacks on the GORM DB as required by gorm.Plugin.
 func (p *PulsePlugin) Initialize(db *gorm.DB) error {
+	p.db = db
 	cb := db.Callback()
 
 	// Create

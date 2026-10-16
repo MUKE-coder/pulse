@@ -1,16 +1,15 @@
-export default function StatCard({ label, value, sub, color = '#e2e8f0' }) {
+// StatCard is the simple tile: a label, a mono value and one line of
+// context. Tone carries severity — a value is neutral unless the metric
+// itself is in alarm.
+export default function StatCard({ label, value, sub, tone, window }) {
   return (
-    <div style={{
-      background: '#111118', border: '1px solid #1e1e2e', borderRadius: 8,
-      padding: '16px 20px',
-    }}>
-      <p style={{ color: '#64748b', fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 4 }}>
-        {label}
-      </p>
-      <p style={{ fontSize: 26, fontWeight: 700, color, lineHeight: 1.2 }}>
-        {value}
-      </p>
-      {sub && <p style={{ color: '#64748b', fontSize: 12, marginTop: 4 }}>{sub}</p>}
+    <div className={`card kpi${tone === 'crit' ? ' is-critical' : ''}`}>
+      <div className="kpi-head">
+        <span>{label}</span>
+        {window ? <span className="window">{window}</span> : null}
+      </div>
+      <div className={`kpi-value${tone ? ` ${tone}` : ''}`}>{value}</div>
+      {sub ? <div className="kpi-foot"><span>{sub}</span></div> : null}
     </div>
   )
 }

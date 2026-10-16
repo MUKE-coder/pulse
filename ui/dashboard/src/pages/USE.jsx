@@ -5,10 +5,10 @@ import { useAPI } from '../hooks/useAPI'
 // Backend: GET /pulse/api/use returns USESnapshot (pulse/use.go).
 
 const levelStyles = {
-  green:   'bg-emerald-500/10 text-emerald-300 ring-emerald-500/30',
-  amber:   'bg-amber-500/10  text-amber-300  ring-amber-500/30',
-  red:     'bg-red-500/10    text-red-300    ring-red-500/30',
-  unknown: 'bg-slate-700/30  text-slate-400  ring-slate-600/30',
+  green:   'bg-ok/10 text-ok ring-ok/30',
+  amber:   'bg-warn/10  text-warn  ring-warn/30',
+  red:     'bg-crit/10    text-crit    ring-crit/30',
+  unknown: 'bg-surface-2  text-ink-2  ring-line-strong',
 }
 
 function Cell({ metric }) {
@@ -19,7 +19,7 @@ function Cell({ metric }) {
       <div className={`inline-block px-2 py-1 rounded ring-1 ${cls} text-xs font-medium`}>
         {metric.display}
       </div>
-      <p className="text-[11px] text-slate-500 mt-1 leading-snug">{metric.description}</p>
+      <p className="text-[11px] text-ink-3 mt-1 leading-snug">{metric.description}</p>
     </td>
   )
 }
@@ -43,49 +43,49 @@ export default function USE() {
     return () => { alive = false; clearInterval(id) }
   }, [get])
 
-  if (loading) return <div className="text-slate-500 py-10">Loading…</div>
+  if (loading) return <div className="text-ink-3 py-10">Loading…</div>
 
   const resources = snap?.resources || []
 
   return (
     <div>
       <div className="flex items-center justify-between mb-2">
-        <h1 className="text-xl font-bold text-slate-200">USE Method</h1>
-        <span className="text-xs text-slate-500">
-          {snap?.host && <>host <span className="text-slate-300">{snap.host}</span> · </>}
-          {snap?.os && <>os <span className="text-slate-300">{snap.os}</span> · </>}
+        <h1 className="text-[22px] font-semibold tracking-[-0.01em] text-ink">USE Method</h1>
+        <span className="text-xs text-ink-3">
+          {snap?.host && <>host <span className="text-ink-2">{snap.host}</span> · </>}
+          {snap?.os && <>os <span className="text-ink-2">{snap.os}</span> · </>}
           auto-refresh 5 s
         </span>
       </div>
-      <p className="text-slate-500 text-xs mb-5">
-        Brendan Gregg's <a className="text-indigo-400 hover:text-indigo-300" href="https://brendangregg.com/usemethod.html" target="_blank" rel="noreferrer">USE method</a>:
+      <p className="text-ink-3 text-xs mb-5">
+        Brendan Gregg's <a className="text-accent hover:text-accent" href="https://brendangregg.com/usemethod.html" target="_blank" rel="noreferrer">USE method</a>:
         for every resource, walk Utilization / Saturation / Errors.
         Green / amber / red bands let you scan for the bottleneck in one glance.
       </p>
 
       {resources.length === 0 && (
-        <div className="bg-slate-900/60 border border-slate-800 rounded-lg p-5 text-sm text-slate-400">
+        <div className="bg-surface border border-line rounded-lg p-5 text-sm text-ink-2">
           USE sampler is disabled, or no data has arrived yet.
-          Enable it with the default <code className="text-indigo-300">pulse.Mount(…)</code>
-          (it's on by default), or re-enable via <code className="text-indigo-300">pulse.WithUSEDisabled()=false</code>.
+          Enable it with the default <code className="text-accent">pulse.Mount(…)</code>
+          (it's on by default), or re-enable via <code className="text-accent">pulse.WithUSEDisabled()=false</code>.
         </div>
       )}
 
       {resources.length > 0 && (
-        <div className="bg-slate-900/60 border border-slate-800 rounded-lg overflow-hidden">
+        <div className="bg-surface border border-line rounded-lg overflow-hidden">
           <table className="w-full text-sm">
-            <thead className="bg-slate-950/50">
-              <tr className="text-xs uppercase tracking-wider text-slate-500">
+            <thead className="bg-surface">
+              <tr className="text-xs uppercase tracking-wider text-ink-3">
                 <th className="px-3 py-2 text-left font-medium w-28">Resource</th>
                 <th className="px-3 py-2 text-left font-medium">Utilization</th>
                 <th className="px-3 py-2 text-left font-medium">Saturation</th>
                 <th className="px-3 py-2 text-left font-medium">Errors</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-800">
+            <tbody className="divide-y divide-line">
               {resources.map((r) => (
-                <tr key={r.name} className="hover:bg-slate-900">
-                  <td className="px-3 py-3 font-semibold text-slate-200 align-top">{r.name}</td>
+                <tr key={r.name} className="hover:bg-surface">
+                  <td className="px-3 py-3 font-semibold text-ink align-top">{r.name}</td>
                   <Cell metric={r.utilization} />
                   <Cell metric={r.saturation} />
                   <Cell metric={r.errors} />

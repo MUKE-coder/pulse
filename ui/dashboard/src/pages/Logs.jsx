@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { useAPI } from '../hooks/useAPI'
+import { useUI } from '../context/UIContext'
+import { PageHead } from '../components/ui'
 import { useWebSocket } from '../hooks/useWebSocket'
 import LogLines from '../components/LogLines'
 
-const RANGES = ['5m', '15m', '1h', '6h', '24h', '7d']
 const LEVELS = ['debug', 'info', 'warn', 'error']
 const LIVE_MAX = 1000
 
@@ -16,16 +17,11 @@ function levelValue(level) {
   return m ? base[m[1]] + Number(m[2] || 0) : 0
 }
 
-const btn = {
-  padding: '6px 14px', borderRadius: 6, border: '1px solid #6366f140', background: '#6366f118',
-  color: '#818cf8', fontSize: 13, fontWeight: 600, cursor: 'pointer',
-}
-
 export default function LogsPage() {
+  const { range } = useUI()
   const { get } = useAPI()
   const [params, setParams] = useSearchParams()
   const traceId = params.get('trace_id') || ''
-  const [range, setRange] = useState('1h')
   const [level, setLevel] = useState('')
   const [q, setQ] = useState('')
   const [live, setLive] = useState(false)
@@ -68,50 +64,43 @@ export default function LogsPage() {
   }, [data.logs, live])
 
   return (
-    <div>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
-        <h1 style={{ fontSize: 22, fontWeight: 700 }}>Logs</h1>
-        <label style={{
-          display: 'flex', gap: 6, alignItems: 'center', fontSize: 13, cursor: 'pointer',
-          color: live ? '#22c55e' : '#8892a4',
-        }}>
-          <input type="checkbox" checked={live} onChange={(e) => setLive(e.target.checked)} />
-          Live tail
-        </label>
-      </div>
+    <>
+      <PageHead
+        title="Logs"
+        subtitle={traceId ? 'One request, line by line' : undefined}
+        actions={
+          <label className="btn" style={{ gap: 8, cursor: 'pointer', color: live ? 'var(--accent)' : undefined }}>
+            <input type="checkbox" checked={live} onChange={(e) => setLive(e.target.checked)} />
+            Live tail
+          </label>
+        }
+      />
 
       {!data.capturing && <CaptureHint supported={data.supported} />}
 
       <form
         onSubmit={(e) => { e.preventDefault(); fetchLogs() }}
-        style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}
+        style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}
       >
-        <select value={range} onChange={(e) => setRange(e.target.value)} disabled={!!traceId}
-          title={traceId ? 'A request trace is shown whenever it happened' : undefined}>
-          {RANGES.map((r) => <option key={r} value={r}>Last {r}</option>)}
-        </select>
-        <select value={level} onChange={(e) => setLevel(e.target.value)}>
+        <select className="input" style={{ width: 'auto' }} value={level}
+          onChange={(e) => setLevel(e.target.value)}>
           <option value="">All levels</option>
           {LEVELS.map((l) => <option key={l} value={l}>{l} and above</option>)}
         </select>
-        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search messages"
-          style={{ flex: 1, minWidth: 180 }} />
-        <button type="submit" style={btn}>Search</button>
+        <input className="input" value={q} onChange={(e) => setQ(e.target.value)}
+          placeholder="Search messages" style={{ flex: 1, minWidth: 180, width: 'auto' }} />
+        <button type="submit" className="btn">Search</button>
       </form>
 
       {traceId && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12, fontSize: 13, color: '#94a3b8' }}>
-          Showing one request's lines: <code style={{ color: '#e2e8f0' }}>{traceId}</code>
-          <Link to={`/pulse/ui/traces/${traceId}`} style={{ ...btn, padding: '2px 10px', fontSize: 12, textDecoration: 'none' }}>
-            Open trace
-          </Link>
-          <button type="button" onClick={() => setParams({})} style={{ ...btn, padding: '2px 10px', fontSize: 12 }}>
-            Show all
-          </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12, fontSize: 13, color: 'var(--text-2)' }}>
+          Showing one request's lines: <code style={{ color: 'var(--text)' }}>{traceId}</code>
+          <Link to={`/pulse/ui/traces/${traceId}`} className="btn btn-sm">Open trace</Link>
+          <button type="button" className="btn btn-sm" onClick={() => setParams({})}>Show all</button>
         </div>
       )}
 
-      {loading ? <p style={{ color: '#64748b' }}>Loading...</p> : (
+      {loading ? <p style={{ color: 'var(--text-3)' }}>Loading...</p> : (
         <div ref={scroller} style={{ maxHeight: 'calc(100vh - 240px)', overflow: 'auto' }}>
           <LogLines
             logs={data.logs}
@@ -120,26 +109,23 @@ export default function LogsPage() {
           />
         </div>
       )}
-    </div>
+    </>
   )
 }
 
 function CaptureHint({ supported }) {
   return (
-    <div style={{
-      padding: 16, border: '1px solid #6366f130', background: '#6366f10d', borderRadius: 8,
-      marginBottom: 16, fontSize: 13, color: '#cbd5e1', lineHeight: 1.6,
-    }}>
-      <strong style={{ color: '#e2e8f0' }}>Log capture is off.</strong> Send your application's logs through
+    <div className="card" style={{ fontSize: 13, color: 'var(--text-2)', lineHeight: 1.6 }}>
+      <strong style={{ color: 'var(--text)' }}>Log capture is off.</strong> Send your application's logs through
       Pulse to see them here, next to the requests and errors they belong to:
-      <pre style={{
-        marginTop: 10, padding: 12, background: '#0a0a12', borderRadius: 6, fontSize: 12, color: '#94a3b8',
-        fontFamily: "'SF Mono', 'Fira Code', monospace", overflow: 'auto',
+      <pre className="mono" style={{
+        marginTop: 10, padding: 12, background: 'var(--bg-2)', border: '1px solid var(--border)',
+        borderRadius: 'var(--radius)', fontSize: 12, color: 'var(--text-2)', overflow: 'auto',
       }}>{`slog.SetDefault(slog.New(p.SlogHandler(slog.NewJSONHandler(os.Stdout, nil))))
 
 // or, for the log package, zap or zerolog:
 log.SetOutput(p.LogWriter(os.Stderr))`}</pre>
-      {!supported && <p style={{ marginTop: 8, color: '#f59e0b' }}>The configured storage backend doesn't keep logs.</p>}
+      {!supported && <p style={{ marginTop: 8, color: 'var(--warn)' }}>The configured storage backend doesn't keep logs.</p>}
     </div>
   )
 }

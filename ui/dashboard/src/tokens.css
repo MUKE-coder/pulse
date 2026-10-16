@@ -1,0 +1,132 @@
+/* Pulse design tokens — Oct 2026 redesign.
+   Every colour in the dashboard comes from here; components reference
+   tokens, never a hex. The theme is one attribute on <html>:
+   data-theme="dark" | "light", set before first paint by the inline script
+   in index.html so there is no flash.
+
+   Two notes where the handover's token table and the rendered canvas
+   disagreed, resolved in favour of the canvas:
+   - The sidebar and the login brand panel stay dark in both themes (the
+     light mockups show a slate sidebar against a light page), so they have
+     their own --sidebar-* / --brand-* tokens.
+   - Everything else follows the guide's values exactly. */
+
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  /* surfaces */
+  --bg:            #0B0E13;   /* page */
+  --bg-2:          #0E1218;   /* inputs */
+  --surface:       #12161D;   /* cards, tables, header pills */
+  --surface-2:     #171C25;   /* active nav, hover rows */
+  --border:        #1C232D;   /* hairlines, card edges */
+  --border-strong: #2E3845;   /* input edges, dashed empty states */
+
+  /* text */
+  --text:          #E8ECF2;
+  --text-2:        #A3ADBA;
+  --text-3:        #6B7686;
+
+  /* accent */
+  --accent:        #2DD4BF;
+  --accent-hover:  #5EEAD4;
+  --on-accent:     #06211D;
+  --accent-soft:   rgba(45,212,191,.12);
+  --accent-border: #1E3A35;
+  --focus-ring:    rgba(45,212,191,.18);
+
+  /* status */
+  --ok:   #4ADE80;  --ok-soft:   rgba(74,222,128,.10);  --ok-border:   rgba(74,222,128,.25);
+  --warn: #FBBF24;  --warn-soft: rgba(251,191,36,.10);  --warn-border: rgba(251,191,36,.25);
+  --crit: #F87171;  --crit-soft: rgba(248,113,113,.10); --crit-border: rgba(248,113,113,.25);
+  --info: #60A5FA;  --info-soft: rgba(96,165,250,.10);  --info-border: rgba(96,165,250,.25);
+  --crit-card-border: #3A2626;
+
+  /* misc */
+  --avatar-bg:        #1F2A2A;
+  --logo-tile:        #12161D;
+  --logo-tile-border: #2A3340;
+  --shadow-card:      none;
+  --chart-grid:       rgba(232,236,242,.07);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg:            #F4F6F9;
+  --bg-2:          #F8FAFC;
+  --surface:       #FFFFFF;
+  --surface-2:     #EEF2F6;
+  --border:        #E2E8F0;
+  --border-strong: #CBD5E1;
+
+  --text:          #0F172A;
+  --text-2:        #475569;
+  --text-3:        #64748B;
+
+  --accent:        #0F766E;
+  --accent-hover:  #115E59;
+  --on-accent:     #FFFFFF;
+  --accent-soft:   #F0FDFA;
+  --accent-border: #99F6E4;
+  --focus-ring:    rgba(15,118,110,.18);
+
+  --ok:   #15803D;  --ok-soft:   #F0FDF4;  --ok-border:   #BBF7D0;
+  --warn: #B45309;  --warn-soft: #FFFBEB;  --warn-border: #FDE68A;
+  --crit: #B91C1C;  --crit-soft: #FEF2F2;  --crit-border: #FECACA;
+  --info: #1D4ED8;  --info-soft: #EFF6FF;  --info-border: #BFDBFE;
+  --crit-card-border: #FECACA;
+
+  --avatar-bg:        #CCFBF1;
+  --logo-tile:        #0F172A;
+  --logo-tile-border: #0F172A;
+  --shadow-card:      0 1px 2px rgba(15,23,42,.04);
+  --chart-grid:       rgba(15,23,42,.07);
+}
+
+/* The sidebar and the login brand panel are dark in both themes. */
+:root,
+:root[data-theme="dark"] {
+  --sidebar-bg:      #0E1218;
+  --sidebar-surface: #171C25;
+  --sidebar-border:  #1C232D;
+  --sidebar-text:    #E8ECF2;
+  --sidebar-text-2:  #A3ADBA;
+  --sidebar-text-3:  #6B7686;
+  --brand-bg:        #0E1218;
+  --brand-grid:      #171C25;
+  --brand-text-2:    #A3ADBA;
+}
+
+:root[data-theme="light"] {
+  --sidebar-bg:      #0F172A;
+  --sidebar-surface: #1A2437;
+  --sidebar-border:  #1E293B;
+  --sidebar-text:    #F1F5F9;
+  --sidebar-text-2:  #94A3B8;
+  --sidebar-text-3:  #64748B;
+  --brand-bg:        #0F172A;
+  --brand-grid:      #1A2437;
+  --brand-text-2:    #94A3B8;
+}
+
+/* non-colour tokens, shared by both themes */
+:root {
+  --font-sans: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  --radius-sm:   4px;
+  --radius:      6px;
+  --radius-lg:   8px;
+  --radius-xl:  10px;
+  --radius-full: 999px;
+
+  --space-1: 4px;  --space-2: 8px;  --space-3: 12px; --space-4: 16px;
+  --space-5: 20px; --space-6: 24px; --space-7: 28px; --space-8: 32px;
+
+  --sidebar-w: 240px;
+  --control-h: 30px;
+  --control-h-md: 32px;
+  --control-h-lg: 44px;
+}

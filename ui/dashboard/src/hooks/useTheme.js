@@ -1,55 +1,86 @@
 import { useCallback, useEffect, useState } from 'react'
 
-const KEY = 'pulse.theme'
+const KEY = 'pulse-theme'
 
-const stored = () => {
+function stored() {
   try {
-    return localStorage.getItem(KEY) || 'system'
+    const v = localStorage.getItem(KEY)
+    return v === 'light' || v === 'dark' ? v : null
   } catch {
-    return 'system'
+    return null
   }
 }
 
-const systemDark = () => window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false
+const systemTheme = () =>
+  window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
 
-// useTheme keeps the dashboard's light/dark preference — following the
-// system until someone chooses — and resolves the design tokens charts need
-// as concrete colours, since SVG attributes can't read CSS variables.
+// resolve mirrors the inline script in index.html: user choice, then the
+// system, then dark.
+const resolve = () => stored() || systemTheme()
+
+// readPalette turns the CSS tokens into concrete colours. Charts draw with
+// SVG attributes, which can't read custom properties, so they need the
+// resolved values and a re-render whenever the theme flips.
+function readPalette() {
+  const css = getComputedStyle(document.documentElement)
+  const token = (name) => css.getPropertyValue(`--${name}`).trim()
+  return {
+    text: token('text'), text2: token('text-2'), text3: token('text-3'),
+    border: token('border'), borderStrong: token('border-strong'),
+    surface: token('surface'), surface2: token('surface-2'), bg: token('bg'),
+    accent: token('accent'), accentSoft: token('accent-soft'),
+    ok: token('ok'), warn: token('warn'), crit: token('crit'), info: token('info'),
+    grid: token('chart-grid'),
+  }
+}
+
+// setTheme is the single writer: it flips the attribute, remembers the
+// choice in localStorage and a cookie (so a server-rendered page could read
+// it), and announces the change for anything drawing outside React.
+export function setTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme)
+  try {
+    localStorage.setItem(KEY, theme)
+  } catch {}
+  try {
+    document.cookie = `${KEY}=${theme}; path=/; max-age=31536000; samesite=lax`
+  } catch {}
+  window.dispatchEvent(new CustomEvent('pulse:theme', { detail: { theme } }))
+}
+
 export function useTheme() {
-  const [pref, setPref] = useState(stored)
-  const [dark, setDark] = useState(() => (stored() === 'system' ? systemDark() : stored() === 'dark'))
-  const [palette, setPalette] = useState({})
+  const [theme, setThemeState] = useState(resolve)
+  const [palette, setPalette] = useState(readPalette)
 
+  // Keep every hook instance in step with whoever flipped the theme.
   useEffect(() => {
-    const root = document.documentElement
-    if (pref === 'system') root.removeAttribute('data-theme')
-    else root.setAttribute('data-theme', pref)
-    try {
-      localStorage.setItem(KEY, pref)
-    } catch {}
-    setDark(pref === 'system' ? systemDark() : pref === 'dark')
-  }, [pref])
+    const onChange = (e) => setThemeState(e.detail?.theme || resolve())
+    window.addEventListener('pulse:theme', onChange)
+    return () => window.removeEventListener('pulse:theme', onChange)
+  }, [])
 
-  // Follow the system while no explicit choice is stored.
+  // Follow the system only while no explicit choice is stored.
   useEffect(() => {
-    if (pref !== 'system' || !window.matchMedia) return
-    const mq = window.matchMedia('(prefers-color-scheme: dark)')
-    const onChange = () => setDark(mq.matches)
+    if (!window.matchMedia) return
+    const mq = window.matchMedia('(prefers-color-scheme: light)')
+    const onChange = () => {
+      if (stored()) return
+      const next = mq.matches ? 'light' : 'dark'
+      document.documentElement.setAttribute('data-theme', next)
+      setThemeState(next)
+      window.dispatchEvent(new CustomEvent('pulse:theme', { detail: { theme: next } }))
+    }
     mq.addEventListener('change', onChange)
     return () => mq.removeEventListener('change', onChange)
-  }, [pref])
+  }, [])
 
-  // Re-read the tokens whenever the resolved theme changes.
+  // Tokens are read after the attribute has been applied, so the palette
+  // always matches what is on screen.
   useEffect(() => {
-    const css = getComputedStyle(document.documentElement)
-    const token = (name) => css.getPropertyValue(`--ops-${name}`).trim()
-    setPalette({
-      ink: token('ink'), ink2: token('ink-2'), ink3: token('ink-3'),
-      line: token('line'), grid: token('grid'), surface: token('surface'),
-      accent: token('accent'), ok: token('ok'), warn: token('warn'), bad: token('bad'),
-    })
-  }, [dark])
+    setPalette(readPalette())
+  }, [theme])
 
-  const toggle = useCallback(() => setPref(dark ? 'light' : 'dark'), [dark])
-  return { dark, palette, toggle }
+  const toggle = useCallback(() => setTheme(theme === 'dark' ? 'light' : 'dark'), [theme])
+
+  return { theme, dark: theme === 'dark', palette, toggle, setTheme }
 }

@@ -9,6 +9,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — the dashboard, redesigned
+
+- New visual language throughout: a neutral slate palette with a single
+  teal accent, a pulse-line logo in place of the purple heart tile, IBM
+  Plex Sans for the interface and IBM Plex Mono with tabular figures for
+  every number, route and SQL string. Colour now carries status and
+  nothing else — a KPI number is neutral unless the metric itself is in
+  alarm.
+- **Light and dark**, driven by one set of CSS custom properties on
+  `<html>`. It follows the operating system until the toggle in the top bar
+  overrides it, and an inline script applies the saved choice before first
+  paint so a reload does not flash the wrong theme. Charts read the same
+  tokens and redraw when it flips.
+- **New shell.** The sidebar groups pages under Observe, Reliability and
+  Tools, with live counts beside Errors and Alerts and a status dot beside
+  Health. The top bar carries the breadcrumb, a `⌘K` search over routes,
+  errors and pages, the environment, one time range shared by every page
+  (the per-page pickers are gone), a Live/Paused switch and the theme
+  toggle.
+- **Database page rebuilt** as the reference screen: KPI tiles with their
+  window, a delta against the previous window and a status badge; a
+  connection-pool card with a usage bar and four readouts, where Wait count
+  is flagged only when it rises while you watch; tabs with counts; N+1
+  findings ranked by added latency with a severity band; and a real empty
+  state on Query plans instead of one grey sentence.
+- **Login rebuilt** as a split screen: a brand panel that stays dark in
+  both themes with three live readouts, and a form with show/hide
+  password, "keep me signed in", and distinct wording for bad credentials
+  and for the rate limiter. The session now survives a reload — in
+  `sessionStorage` by default, in `localStorage` when you ask it to stay.
+- Fonts are **self-hosted** (woff2, latin, three weights each, ~120KB), so
+  the dashboard looks right on a host with no internet.
+
+### Added — supporting the redesign
+
+- `WithPublicStatus()` serves `GET /pulse/api/public/status` without
+  authentication: a status word, an uptime and a p95, and nothing
+  route-specific. It is what the login screen's status cards read, it is
+  **off by default**, and with it off those cards stay blank rather than
+  showing invented numbers.
+- `POST /pulse/api/database/explain` explains the slowest recorded `SELECT`
+  on demand — the Database page's "Run EXPLAIN" button. Pulse keeps the
+  statement but not the values it ran with, so a parameterised query is
+  armed for its next run rather than explained with invented parameters,
+  and the page says which happened.
+- `GET /pulse/api/database/overview` now names the database being watched
+  (engine and database name, from GORM) and reports the slow threshold, so
+  the page can say what it is showing you.
+- `?end=<RFC3339>` slides any `?range=` window back in time, which is how
+  the dashboard asks about the previous window for an honest delta.
+
+
 ## [1.3.0] — 2026-10-15
 
 A release about memory: Pulse's own, and the product's. Trace view, deploy

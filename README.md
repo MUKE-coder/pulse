@@ -72,13 +72,19 @@ Pulse ships with a full React dashboard embedded directly into the Go binary usi
 
 **URL:** `http://localhost:8080/pulse/ui/` (default credentials: `admin` / `pulse`)
 
+**Light and dark.** The dashboard follows the operating system by default and the toggle in the top bar overrides it, remembered per browser. Every colour comes from one set of CSS custom properties, so both themes share the same layout, spacing and type — only the values change. Charts read the same tokens and redraw when the theme flips.
+
+**The shell.** A 240px sidebar groups the pages under *Observe*, *Reliability* and *Tools*, with live counts beside Errors and Alerts and a status dot beside Health. The top bar carries the breadcrumb, a `⌘K` search over routes, errors and pages, the environment, one time range shared by every page, a Live/Paused switch and the theme toggle.
+
+**Type and numbers.** IBM Plex Sans for the interface, IBM Plex Mono with tabular figures for every number, route and SQL string, so columns line up and values are scannable. The fonts are self-hosted inside the binary — about 120KB — so the dashboard looks right on a host with no internet.
+
 **Pages:**
 
 | Page | Description |
 |------|-------------|
 | **Overview** | KPI cards (requests, error rate, latency, goroutines), throughput and error charts with load-test runs as bands and restarts as markers, top routes, recent errors, and a banner when data is missing after a restart |
 | **Routes** | Searchable route table with method badges, latency percentiles (P50/P95/P99), RPM, trend indicators; click for detail modal with latency distribution chart |
-| **Database** | Slow queries, query patterns, N+1 detection with tabs; connection pool stats (open, in-use, idle) |
+| **Database** | KPI tiles with their window, a delta against the previous window and a status badge; a connection-pool card with a usage bar and Open / In use / Idle / Wait count readouts; tabs for slow queries, patterns, N+1 detections ranked by added latency with a severity band, and captured query plans |
 | **Errors** | Filterable error list (by type, muted, resolved); detail modal with full stack trace, mute/resolve/delete actions |
 | **Runtime** | Memory and goroutine line charts over time, system info (Go version, CPUs, PID); real-time updates via WebSocket |
 | **Health** | Health check cards with status badges and latency; run checks on-demand; per-check history table |
@@ -89,7 +95,9 @@ Pulse ships with a full React dashboard embedded directly into the Go binary usi
 | **Flame Graph** | On-demand sampled flame graph (double-gated) |
 | **Settings** | Data export (JSON/CSV), storage capacity, current configuration display, danger zone data reset |
 
-**Tech Stack:** React 19, React Router 7, Vite 6, Tailwind CSS 4, Recharts 2
+**Login.** A split screen: a brand panel that stays dark in both themes, and the form. The panel's three readouts — uptime, p95 latency and status — are real or blank, never invented; they come from the opt-in public status endpoint (see [`WithPublicStatus`](#dashboard-authentication)). "Keep me signed in" is what decides whether the session outlives the tab.
+
+**Tech Stack:** React 19, React Router 7, Vite 6, Tailwind CSS 4, Recharts 2, IBM Plex (self-hosted), Lucide icons
 
 **Rebuilding the dashboard (contributors only):**
 
@@ -215,8 +223,18 @@ Dashboard: pulse.DashboardConfig{
     // Optional escape hatch: lets Pulse start in production with the shipped
     // default credentials. Only use this behind a private network.
     AllowDefaultCredentials: false,
+
+    // Serve <prefix>/api/public/status without authentication, so the login
+    // screen can show whether the service is up, how long it has been up and
+    // its p95 latency (default: false — those cards stay blank until you
+    // turn it on).
+    PublicStatus: pulse.Bool(false),
 },
 ```
+
+#### The one unauthenticated view of live data
+
+`WithPublicStatus()` serves `GET /pulse/api/public/status`, which is what the login screen's three status cards read. It carries a status word, an uptime and a p95 latency, and nothing route-specific — a status card, not a dashboard. It is off by default because anyone who can reach the login page can then read those three numbers; with it off the cards show em-dashes rather than invented values.
 
 #### Default credentials are blocked in production
 
@@ -996,6 +1014,7 @@ All endpoints under `/pulse/api/` require JWT authentication (except login).
 | `GET` | `/pulse/api/database/n1/ranked` | `?range=1h&limit=50` | N+1 grouped by (route, pattern), ranked by impact score |
 | `GET` | `/pulse/api/database/pool` | | Connection pool stats |
 | `GET` | `/pulse/api/database/plans` | `?limit=20` | Captured query plans, newest first |
+| `POST` | `/pulse/api/database/explain` | — | Explain the slowest recorded `SELECT` now, or arm it for its next run |
 
 ### Errors
 
@@ -1096,6 +1115,16 @@ Most endpoints accept a `?range=` query parameter:
 | `6h` | Last 6 hours |
 | `24h` | Last 24 hours |
 | `7d` | Last 7 days |
+
+Add `?end=<RFC3339>` to slide that window back in time — `?range=15m&end=2026-10-16T09:00:00Z` is the fifteen minutes before 09:00. The dashboard uses it to compare a window with the one before it, so a delta compares like with like.
+
+### Authentication-free endpoints
+
+| Method | Endpoint | Notes |
+|--------|----------|-------|
+| `POST` | `/pulse/api/auth/login` | Rate limited per IP |
+| `GET` | `/pulse/health`, `/pulse/health/live`, `/pulse/health/ready` | Kubernetes probes |
+| `GET` | `/pulse/api/public/status` | Only when `Dashboard.PublicStatus` is set; status, uptime and p95 for the login screen |
 
 ---
 

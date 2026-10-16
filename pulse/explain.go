@@ -405,3 +405,84 @@ var (
 	_ planStore = (*SQLiteStorage)(nil)
 	_ planStore = (*PostgresStorage)(nil)
 )
+
+// placeholderCount counts the bind parameters in a statement: ? for SQLite
+// and MySQL, $1… for PostgreSQL. It answers one question — can Pulse run
+// this statement with no values? — so it counts a $ inside a string literal
+// too: waiting for the real values is the safe way to be wrong.
+func placeholderCount(query string) int {
+	n := strings.Count(query, "?")
+	for i := 0; i+1 < len(query); i++ {
+		if query[i] == '$' && query[i+1] >= '1' && query[i+1] <= '9' {
+			n++
+		}
+	}
+	return n
+}
+
+// explainNowHandler serves POST /pulse/api/database/explain: explain the
+// slowest SELECT Pulse has recorded, now, instead of waiting for it to come
+// round again. It is what the Database page's "Run EXPLAIN" button calls.
+func explainNowHandler(p *Pulse) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if p.explainer == nil {
+			c.JSON(http.StatusConflict, gin.H{
+				"error": "query plans are off",
+				"hint":  "mount Pulse with pulse.WithExplainSlowQueries(0) to let it ask the database for plans",
+			})
+			return
+		}
+
+		queries, err := p.storage.GetSlowQueries(0, 200)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		var pick *QueryMetric
+		for i := range queries {
+			q := queries[i]
+			if q.Error != "" || !strings.EqualFold(q.Operation, "SELECT") || q.SQL == "" {
+				continue
+			}
+			if pick == nil || q.Duration > pick.Duration {
+				pick = &queries[i]
+			}
+		}
+		if pick == nil {
+			c.JSON(http.StatusOK, gin.H{
+				"explained": false,
+				"message":   "no SELECT has been recorded yet, so there is nothing to explain",
+			})
+			return
+		}
+
+		// An explicit ask overrides the per-pattern interval.
+		e := p.explainer
+		e.mu.Lock()
+		delete(e.seen, pick.NormalizedSQL)
+		e.mu.Unlock()
+
+		// Recorded queries keep the statement but not the values it ran
+		// with — those are the application's data, and Pulse does not store
+		// them. A statement with no placeholders can be explained right
+		// here; one with placeholders has to wait for its next run, when
+		// the GORM callback has the values to bind.
+		if placeholderCount(pick.SQL) > 0 {
+			c.JSON(http.StatusOK, gin.H{
+				"explained": false,
+				"armed":     true,
+				"query":     pick.NormalizedSQL,
+				"message": "This query takes parameters, and Pulse does not keep the values it ran with. " +
+					"Its plan will be captured the next time it runs.",
+			})
+			return
+		}
+
+		e.explain(c.Request.Context(), explainJob{metric: *pick, sql: pick.SQL})
+		c.JSON(http.StatusOK, gin.H{
+			"explained": true,
+			"query":     pick.NormalizedSQL,
+			"duration":  pick.Duration,
+		})
+	}
+}

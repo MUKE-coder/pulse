@@ -116,6 +116,12 @@ func registerAPIRoutes(router *gin.Engine, p *Pulse) {
 	api.POST("/auth/login", loginHandler(p, limiter))
 	api.GET("/auth/verify", authMiddleware(p), verifyHandler())
 
+	// Public: the three numbers the login screen shows, and only when
+	// asked for — see Dashboard.PublicStatus.
+	if boolValue(p.config.Dashboard.PublicStatus) {
+		api.GET("/public/status", publicStatusHandler(p))
+	}
+
 	// Protected: all other endpoints
 	protected := api.Group("")
 	protected.Use(authMiddleware(p))
@@ -136,6 +142,7 @@ func registerAPIRoutes(router *gin.Engine, p *Pulse) {
 	protected.GET("/database/n1/ranked", dbN1RankedHandler(p))
 	protected.GET("/database/pool", dbPoolHandler(p))
 	protected.GET("/database/plans", plansHandler(p))
+	protected.POST("/database/explain", explainNowHandler(p))
 
 	// Outbound dependencies
 	protected.GET("/dependencies", dependenciesHandler(p))
@@ -397,12 +404,20 @@ func dbOverviewHandler(p *Pulse) gin.HandlerFunc {
 			totalQueries += pat.Count
 		}
 
+		engine, database := monitoredDatabase(p)
 		c.JSON(http.StatusOK, gin.H{
 			"total_queries":    totalQueries,
 			"pattern_count":    len(patterns),
 			"slow_query_count": len(slow),
 			"n1_count":         len(n1),
 			"pool":             pool,
+			// What is being watched, and what counts as slow, so the page
+			// can say "PostgreSQL · app_primary · over 200ms" rather than
+			// leaving the reader to guess.
+			"engine":            engine,
+			"database":          database,
+			"slow_threshold_ms": float64(p.config.Database.SlowQueryThreshold) / float64(time.Millisecond),
+			"explain_enabled":   boolValue(p.config.Database.ExplainSlowQueries),
 		})
 	}
 }
@@ -830,6 +845,47 @@ func testRunsCreateHandler(p *Pulse) gin.HandlerFunc {
 
 // --- Settings & Data ---
 
+// monitoredDatabase names the database Pulse is watching: the dialect, and
+// the database the connection is pointed at. Both come from GORM, so they
+// describe the application's database rather than Pulse's own storage.
+func monitoredDatabase(p *Pulse) (engine, database string) {
+	if p.gormPlugin == nil || p.gormPlugin.db == nil {
+		return "", ""
+	}
+	engine = p.gormPlugin.db.Dialector.Name()
+	p.dbNameOnce.Do(func() {
+		// CurrentDatabase runs a query, so it is asked once and kept.
+		p.dbName = p.gormPlugin.db.Migrator().CurrentDatabase()
+	})
+	return engine, p.dbName
+}
+
+// publicStatusHandler serves GET /pulse/api/public/status: whether the
+// service is up, how long it has been up and its p95 latency. It is the
+// only unauthenticated view of live data Pulse serves, it is off unless
+// Dashboard.PublicStatus says otherwise, and it carries nothing
+// route-specific — the login screen needs a status card, not a dashboard.
+func publicStatusHandler(p *Pulse) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		status := "healthy"
+		if p.healthRunner != nil {
+			status = p.healthRunner.GetCompositeStatus()
+		}
+		resp := gin.H{
+			"status":         status,
+			"uptime":         formatDuration(p.Uptime()),
+			"uptime_seconds": int64(p.Uptime().Seconds()),
+			"version":        Version,
+		}
+		// p95 over the last hour, from the same exact per-minute counts the
+		// SLO evaluator uses, so it can't be skewed by sampling.
+		if overview, err := p.storage.GetOverview(Last1h()); err == nil && overview != nil {
+			resp["p95_latency_ms"] = float64(overview.P95Latency) / float64(time.Millisecond)
+		}
+		c.JSON(http.StatusOK, resp)
+	}
+}
+
 func settingsHandler(p *Pulse) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		cfg := p.config
@@ -860,11 +916,21 @@ func dataResetHandler(p *Pulse) gin.HandlerFunc {
 
 // --- Query helpers ---
 
+// parseTimeRangeParam reads ?range=15m, and optionally ?end=<RFC3339> to
+// slide that window back in time — which is how the dashboard asks about
+// the window before the current one, so a delta compares like with like.
 func parseTimeRangeParam(c *gin.Context) TimeRange {
+	tr := Last1h()
 	if r := c.Query("range"); r != "" {
-		return ParseTimeRange(r)
+		tr = ParseTimeRange(r)
 	}
-	return Last1h()
+	if raw := c.Query("end"); raw != "" {
+		if end, err := time.Parse(time.RFC3339, raw); err == nil {
+			span := tr.End.Sub(tr.Start)
+			tr = TimeRange{Start: end.Add(-span), End: end}
+		}
+	}
+	return tr
 }
 
 func queryInt(c *gin.Context, key string, defaultVal int) int {

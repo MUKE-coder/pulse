@@ -1,5 +1,29 @@
 @import "tailwindcss";
 
+/* Semantic utilities, so the Tailwind-styled pages follow the theme too:
+   bg-surface, text-ink-2, ring-crit/30 and so on all resolve through the
+   same tokens as the hand-written components. Without this a utility like
+   bg-slate-900 would stay dark on a light page. */
+@theme {
+  --color-bg: var(--bg);
+  --color-bg-2: var(--bg-2);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-line: var(--border);
+  --color-line-strong: var(--border-strong);
+  --color-ink: var(--text);
+  --color-ink-2: var(--text-2);
+  --color-ink-3: var(--text-3);
+  --color-accent: var(--accent);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-crit: var(--crit);
+  --color-info: var(--info);
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+}
+
 /* Base styles live in the base layer. Tailwind 4 puts its utilities in a
    cascade layer, and unlayered rules beat layered ones whatever their
    specificity — so an unlayered reset here would silently cancel utilities
@@ -8,33 +32,51 @@
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
   body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', Roboto, sans-serif;
-    background: #0a0a12;
-    color: #e2e8f0;
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.45;
+    background: var(--bg);
+    color: var(--text);
     -webkit-font-smoothing: antialiased;
+    font-feature-settings: 'tnum' 1;
   }
 
-  ::-webkit-scrollbar { width: 6px; height: 6px; }
-  ::-webkit-scrollbar-track { background: #0a0a12; }
-  ::-webkit-scrollbar-thumb { background: #2a2a3e; border-radius: 3px; }
-  ::-webkit-scrollbar-thumb:hover { background: #3a3a4e; }
+  a { color: var(--accent); }
 
+  /* color-scheme in tokens.css already themes native scrollbars; these
+     rules only slim them down. */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
+
+  :focus-visible { outline: none; }
+
+  /* Bare form controls, for the pages that haven't been given .input. */
   input, select, textarea {
-    background: #16161e;
-    border: 1px solid #2a2a3e;
-    color: #e2e8f0;
-    border-radius: 6px;
-    padding: 8px 12px;
+    background: var(--bg-2);
+    border: 1px solid var(--border-strong);
+    color: var(--text);
+    border-radius: var(--radius);
+    padding: 7px 12px;
     outline: none;
-    font-size: 14px;
+    font: inherit;
+    font-size: 13px;
   }
   input:focus, select:focus, textarea:focus {
-    border-color: #6366f1;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--focus-ring);
   }
+  input::placeholder, textarea::placeholder { color: var(--text-3); }
 }
 
+/* Recharts paints its tooltip inline; these are the only overrides it takes. */
 .recharts-tooltip-wrapper .recharts-default-tooltip {
-  background: #16161e !important;
-  border: 1px solid #2a2a3e !important;
-  border-radius: 6px !important;
+  background: var(--surface) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius) !important;
+  color: var(--text) !important;
+  font-size: 12px !important;
 }
+.recharts-tooltip-wrapper .recharts-default-tooltip .recharts-tooltip-label { color: var(--text-2) !important; }
+.recharts-cartesian-axis-tick text { fill: var(--text-3); font-size: 11px; }

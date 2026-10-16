@@ -186,6 +186,13 @@ type DashboardConfig struct {
 	// LoginRateLimit caps successful + failed login attempts per client IP
 	// per minute (default: 10). Zero disables rate limiting.
 	LoginRateLimit int
+	// PublicStatus serves GET <prefix>/api/public/status without
+	// authentication, so the login screen can show whether the service is
+	// up, how long it has been up and its p95 latency (default: false).
+	// Anyone who can reach the login page can then read those three
+	// numbers, which is why it is opt-in; the login page simply leaves the
+	// readouts blank while it is off.
+	PublicStatus *bool
 }
 
 // StorageConfig configures the storage backend.
@@ -691,6 +698,10 @@ func applyDefaults(cfg Config) Config {
 	}
 	if cfg.Profiling.DebugHandlers == nil {
 		cfg.Profiling.DebugHandlers = boolPtr(false)
+	}
+
+	if cfg.Dashboard.PublicStatus == nil {
+		cfg.Dashboard.PublicStatus = boolPtr(false)
 	}
 
 	if cfg.Database.ExplainSlowQueries == nil {

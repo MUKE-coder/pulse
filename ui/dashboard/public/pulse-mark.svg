@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 28 28" role="img" aria-label="Pulse">
+  <rect width="28" height="28" rx="7" fill="#0F172A"/>
+  <path d="M5 14h4.2l2.6-6.5 3.6 13 2.6-6.5H23" fill="none" stroke="#2DD4BF"
+        stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

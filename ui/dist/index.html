@@ -1,11 +1,26 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Pulse Dashboard</title>
-  <script type="module" crossorigin src="/pulse/ui/assets/index-CwrmSBEc.js"></script>
-  <link rel="stylesheet" crossorigin href="/pulse/ui/assets/index-a7nNwmi4.css">
+  <title>Pulse</title>
+  <meta name="description" content="Pulse — every request, every query, in one place." />
+  <link rel="icon" type="image/svg+xml" href="/pulse/ui/pulse-mark.svg" />
+  <link rel="alternate icon" href="/pulse/ui/favicon.ico" />
+  <link rel="apple-touch-icon" href="/pulse/ui/apple-touch-icon.png" />
+  <script>
+    // Resolve the theme before first paint: user choice, then the system,
+    // then dark. Without this the page flashes the wrong theme on reload.
+    (function () {
+      var KEY = 'pulse-theme';
+      var saved = null;
+      try { saved = localStorage.getItem(KEY); } catch (e) {}
+      var system = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', saved === 'light' || saved === 'dark' ? saved : system);
+    })();
+  </script>
+  <script type="module" crossorigin src="/pulse/ui/assets/index-B99ZDe3a.js"></script>
+  <link rel="stylesheet" crossorigin href="/pulse/ui/assets/index-6k9uCvsI.css">
 </head>
 <body>
   <div id="root"></div>

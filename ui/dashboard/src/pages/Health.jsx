@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useAPI } from '../hooks/useAPI'
+import { PageHead } from '../components/ui'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useInstances } from '../hooks/useInstances'
 import StatusBadge from '../components/StatusBadge'
@@ -51,7 +52,7 @@ export default function HealthPage() {
     } catch {}
   }
 
-  if (loading) return <div style={{ color: '#64748b', padding: 40 }}>Loading...</div>
+  if (loading) return <div style={{ color: 'var(--text-3)', padding: 40 }}>Loading...</div>
 
   const checks = health?.checks || {}
   const status = health?.status || 'unknown'
@@ -59,78 +60,72 @@ export default function HealthPage() {
   const historyCols = [
     { key: 'status', label: 'Status', render: (v) => <StatusBadge status={v} /> },
     { key: 'latency_ms', label: 'Latency', render: (v) => `${v?.toFixed(1)}ms` },
-    { key: 'error', label: 'Error', render: (v) => v ? <span style={{ color: '#ef4444', fontSize: 12 }}>{v}</span> : <span style={{ color: '#64748b' }}>-</span> },
+    { key: 'error', label: 'Error', render: (v) => v ? <span style={{ color: 'var(--crit)', fontSize: 12 }}>{v}</span> : <span style={{ color: 'var(--text-3)' }}>-</span> },
     { key: 'timestamp', label: 'Time', render: (v) => v ? new Date(v).toLocaleString() : '-' },
   ]
 
   return (
-    <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <h1 style={{ fontSize: 22, fontWeight: 700 }}>Health</h1>
-        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-          <InstancePicker instances={instances} value={shown} onChange={setInstance} />
-          <StatusBadge status={status} />
-        </div>
-      </div>
+    <>
+      <PageHead
+        title="Health"
+        subtitle={health?.uptime
+          ? `${Object.keys(checks).length} ${Object.keys(checks).length === 1 ? 'check' : 'checks'} · up ${health.uptime}`
+          : undefined}
+        actions={
+          <>
+            <InstancePicker instances={instances} value={shown} onChange={setInstance} />
+            <StatusBadge status={status} />
+          </>
+        }
+      />
 
-      {health?.uptime && (
-        <p style={{ color: '#64748b', fontSize: 13, marginBottom: 16 }}>Uptime: {health.uptime}</p>
-      )}
-
-      {/* Health Check Cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280, 1fr))', gap: 14, marginBottom: 20 }}>
+      <div className="grid-3">
         {Object.entries(checks).map(([name, check]) => (
-          <div key={name} style={{
-            background: '#111118', border: '1px solid #1e1e2e', borderRadius: 8,
-            padding: 16, cursor: 'pointer',
-            borderLeft: `3px solid ${check.status === 'healthy' ? '#22c55e' : check.status === 'degraded' ? '#f59e0b' : '#ef4444'}`,
+          <div key={name} className="card" style={{
+            cursor: 'pointer',
+            borderLeft: `3px solid ${check.status === 'healthy' ? 'var(--ok)' : check.status === 'degraded' ? 'var(--warn)' : 'var(--crit)'}`,
           }}
             onClick={() => fetchHistory(name)}
           >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-              <h3 style={{ fontSize: 15, fontWeight: 600, color: '#e2e8f0' }}>{name}</h3>
+            <div className="card-head" style={{ marginBottom: 8 }}>
+              <h3 className="card-title" style={{ fontSize: 14 }}>{name}</h3>
               <StatusBadge status={check.status} />
             </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span style={{ color: '#64748b', fontSize: 12 }}>
-                Latency: <span style={{ color: '#e2e8f0' }}>{check.latency_ms?.toFixed(1)}ms</span>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
+              <span className="muted" style={{ fontSize: 12 }}>
+                Latency <span className="mono" style={{ color: 'var(--text)' }}>{check.latency_ms?.toFixed(1)}ms</span>
               </span>
-              {local && <button
-                onClick={(e) => { e.stopPropagation(); runCheck(name) }}
-                style={{
-                  padding: '3px 10px', borderRadius: 4, fontSize: 11, fontWeight: 600,
-                  background: '#6366f118', color: '#818cf8', border: '1px solid #6366f130',
-                  cursor: 'pointer',
-                }}
-              >
-                Run
+              {local && <button type="button" className="btn btn-sm"
+                onClick={(e) => { e.stopPropagation(); runCheck(name) }}>
+                Run now
               </button>}
             </div>
             {check.error && (
-              <p style={{ color: '#ef4444', fontSize: 12, marginTop: 8 }}>{check.error}</p>
+              <p style={{ color: 'var(--crit)', fontSize: 12, marginTop: 8 }}>{check.error}</p>
             )}
           </div>
         ))}
       </div>
 
       {Object.keys(checks).length === 0 && (
-        <div style={{
-          background: '#111118', border: '1px solid #1e1e2e', borderRadius: 8,
-          padding: 40, textAlign: 'center', color: '#64748b', fontSize: 14,
-        }}>
-          No health checks registered
+        <div className="empty">
+          <div className="title">No health checks registered</div>
+          <div className="body">
+            Register one with pulse.AddHealthCheck, or mount Pulse with a database and the
+            built-in database check appears here.
+          </div>
         </div>
       )}
 
       {/* History */}
       {selectedCheck && (
-        <div>
-          <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 10 }}>
-            History: <span style={{ color: '#818cf8' }}>{selectedCheck}</span>
-          </h2>
-          <DataTable columns={historyCols} data={history || []} emptyText="No history available" />
-        </div>
+        <section className="section">
+          <div className="section-head">
+            <h2>History — <span className="mono">{selectedCheck}</span></h2>
+          </div>
+          <DataTable columns={historyCols} data={history || []} emptyText="No history recorded yet." />
+        </section>
       )}
-    </div>
+    </>
   )
 }
