@@ -59,6 +59,10 @@ type MemoryStorage struct {
 	plans   map[string]QueryPlan
 	plansMu sync.Mutex
 
+	// CPU profiles captured over load-test runs; see testrun_profile.go.
+	runProfiles   []storedRunProfile
+	runProfilesMu sync.Mutex
+
 	// Captured log lines, allocated on first use; see logs.go.
 	logs        atomic.Pointer[RingBuffer[LogRecord]]
 	logCapacity int
@@ -912,6 +916,10 @@ func (s *MemoryStorage) Reset() error {
 	s.plansMu.Lock()
 	s.plans = nil
 	s.plansMu.Unlock()
+
+	s.runProfilesMu.Lock()
+	s.runProfiles = nil
+	s.runProfilesMu.Unlock()
 
 	return nil
 }

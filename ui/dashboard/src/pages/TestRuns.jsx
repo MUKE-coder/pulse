@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useAPI } from '../hooks/useAPI'
+import { useAuth } from '../context/AuthContext'
 import { isZeroTime } from '../components/TimelineOverlays'
 
 // Test runs page. Backend: GET /pulse/api/test-runs?range=… returns []TestRun
@@ -205,6 +206,90 @@ function Comparison({ id }) {
       <p className="text-[11px] text-ink-3 mt-2">
         Counts every request (not just sampled ones) at one-minute resolution; percentiles are within ~6%.
       </p>
+
+      {cmp.routes?.length ? <RouteBreakdown routes={cmp.routes} /> : null}
+      {cmp.database ? <DatabaseDeltas db={cmp.database} /> : null}
+      <RunProfile id={id} profile={cmp.profile} />
+    </div>
+  )
+}
+
+// RouteBreakdown answers the question the global numbers hide: a load test
+// hammers two or three endpoints, and an average over everything buries the
+// one that fell over.
+function RouteBreakdown({ routes }) {
+  return (
+    <div className="mt-4">
+      <h4 className="text-[11px] uppercase tracking-wider text-ink-3 mb-1">Per route</h4>
+      <table className="text-xs">
+        <thead>
+          <tr className="text-ink-3">
+            <th className="pr-6 py-1 text-left font-medium">Route</th>
+            <th className="pr-6 py-1 text-right font-medium">Requests</th>
+            <th className="pr-6 py-1 text-right font-medium">5xx</th>
+            <th className="pr-6 py-1 text-right font-medium">Avg before</th>
+            <th className="pr-6 py-1 text-right font-medium">Avg during</th>
+            <th className="pr-6 py-1 text-right font-medium">Change</th>
+          </tr>
+        </thead>
+        <tbody>
+          {routes.map((r) => (
+            <tr key={`${r.method} ${r.route}`}>
+              <td className="pr-6 py-0.5 font-mono text-ink">{r.method} {r.route}</td>
+              <td className="pr-6 py-0.5 text-right font-mono text-ink">{r.during.requests.toLocaleString()}</td>
+              <td className={`pr-6 py-0.5 text-right font-mono ${r.during.error_rate > 1 ? 'text-crit' : 'text-ink'}`}>
+                {r.during.error_rate.toFixed(1)}%
+              </td>
+              <td className="pr-6 py-0.5 text-right font-mono text-ink-2">
+                {r.before.requests ? fmtDuration(r.before.avg_ms) : '—'}
+              </td>
+              <td className="pr-6 py-0.5 text-right font-mono text-ink">{fmtDuration(r.during.avg_ms)}</td>
+              <td className={`pr-6 py-0.5 text-right font-mono ${
+                r.slowdown_ratio >= 1.5 ? 'text-crit' : r.slowdown_ratio >= 1.1 ? 'text-warn' : 'text-ink-3'}`}>
+                {r.slowdown_ratio ? `${r.slowdown_ratio.toFixed(1)}×` : '—'}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="text-[11px] text-ink-3 mt-1">
+        Latency here is an average, not a percentile: per-route percentiles are not kept per minute.
+      </p>
+    </div>
+  )
+}
+
+// DatabaseDeltas shows whether each request started doing more database
+// work under load, which is how an N+1 announces itself.
+function DatabaseDeltas({ db }) {
+  return (
+    <div className="mt-4">
+      <h4 className="text-[11px] uppercase tracking-wider text-ink-3 mb-1">Database</h4>
+      <table className="text-xs">
+        <tbody>
+          <tr>
+            <td className="pr-6 py-0.5 text-ink-2">Queries per request</td>
+            <td className="pr-6 py-0.5 text-right font-mono text-ink-2">
+              {db.queries_per_request_before.toFixed(2)} before
+            </td>
+            <td className={`pr-6 py-0.5 text-right font-mono ${db.queries_per_request_increased ? 'text-warn' : 'text-ink'}`}>
+              {db.queries_per_request_during.toFixed(2)} during
+            </td>
+          </tr>
+          <tr>
+            <td className="pr-6 py-0.5 text-ink-2">N+1 detections</td>
+            <td className="pr-6 py-0.5 text-right font-mono text-ink-2">{db.n1_detections_before} before</td>
+            <td className={`pr-6 py-0.5 text-right font-mono ${db.n1_detections_during > db.n1_detections_before ? 'text-crit' : 'text-ink'}`}>
+              {db.n1_detections_during} during
+            </td>
+          </tr>
+          <tr>
+            <td className="pr-6 py-0.5 text-ink-2">Slow queries during</td>
+            <td />
+            <td className="pr-6 py-0.5 text-right font-mono text-ink">{db.slow_queries_during}</td>
+          </tr>
+        </tbody>
+      </table>
     </div>
   )
 }
@@ -222,6 +307,74 @@ function MetadataBadges({ meta }) {
           {k}={typeof v === 'object' ? '…' : String(v).slice(0, 24)}
         </span>
       ))}
+    </div>
+  )
+}
+
+// RunProfile is the half no external tool can do: the flame graph of the
+// run itself, captured in-process while the load was on.
+function RunProfile({ id, profile }) {
+  const { token } = useAuth()
+  const [svg, setSvg] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+
+  if (!profile) {
+    return (
+      <p className="text-[11px] text-ink-3 mt-4">
+        No CPU profile for this run. Pulse captures one when a run&apos;s start is registered
+        with profiling enabled — <code className="text-accent">pulse.WithProfiling()</code> plus{' '}
+        <code className="text-accent">PULSE_PROFILE_ENABLED=true</code>.
+      </p>
+    )
+  }
+  if (profile.in_flight && !profile.available) {
+    return <p className="text-[11px] text-warn mt-4">Profiling this run now. The profile is kept when its end is registered.</p>
+  }
+
+  const show = async () => {
+    setLoading(true); setError('')
+    try {
+      const res = await fetch(`/pulse/api/test-runs/${encodeURIComponent(id)}/profile?format=svg`,
+        { headers: { Authorization: `Bearer ${token}` } })
+      const text = await res.text()
+      if (!res.ok) {
+        try {
+          const j = JSON.parse(text)
+          setError(j.hint || j.error || `HTTP ${res.status}`)
+        } catch {
+          setError(`HTTP ${res.status}`)
+        }
+        return
+      }
+      setSvg(text)
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="mt-4">
+      <div className="flex items-center gap-3">
+        <h4 className="text-[11px] uppercase tracking-wider text-ink-3">CPU profile of the run</h4>
+        <button onClick={show} disabled={loading}
+          className="text-xs px-2.5 py-1 rounded ring-1 ring-line text-ink-2 hover:text-ink disabled:opacity-50">
+          {loading ? 'Rendering…' : svg ? 'Refresh' : 'Show flame graph'}
+        </button>
+        <a className="text-xs text-accent"
+          href={`/pulse/api/test-runs/${encodeURIComponent(id)}/profile`}
+          title="Opens the raw pprof profile; go tool pprof can read it">
+          Download .pprof
+        </a>
+        <span className="text-[11px] text-ink-3">{Math.round((profile.bytes || 0) / 1024)} KB</span>
+      </div>
+      {error ? <p className="text-crit text-xs mt-2">{error}</p> : null}
+      {svg ? (
+        <div className="mt-2 rounded border border-line bg-white overflow-x-auto"
+          dangerouslySetInnerHTML={{ __html: svg }} />
+      ) : null}
     </div>
   )
 }

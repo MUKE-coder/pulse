@@ -184,6 +184,7 @@ func registerAPIRoutes(router *gin.Engine, p *Pulse) {
 	protected.GET("/test-runs", testRunsListHandler(p))
 	protected.POST("/test-runs", testRunsCreateHandler(p))
 	protected.GET("/test-runs/:id/compare", testRunCompareHandler(p))
+	protected.GET("/test-runs/:id/profile", testRunProfileHandler(p))
 
 	// Lifecycle (process start/stop events, data coverage)
 	protected.GET("/lifecycle", lifecycleHandler(p))
@@ -853,8 +854,37 @@ func testRunsCreateHandler(p *Pulse) gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusCreated, run)
+
+		// A run that has not ended yet is a run that is starting: profile
+		// it, so the comparison can say which function got slow rather than
+		// only that something did. The run's end stops it (see issue #11).
+		profiling := false
+		if run.EndedAt.IsZero() {
+			profiling = p.runProfiler.start(run.ID)
+		} else {
+			p.runProfiler.stopAndStore(run.ID)
+			_, ok := p.storage.(testRunProfileStore)
+			profiling = ok && hasRunProfile(p, run.ID)
+		}
+
+		c.JSON(http.StatusCreated, gin.H{
+			"id": run.ID, "name": run.Name, "type": run.Type,
+			"started_at": run.StartedAt, "ended_at": run.EndedAt, "metadata": run.Metadata,
+			// profiling says whether a CPU profile is being taken over this
+			// run, or — on the end call — whether one was kept.
+			"profiling": profiling,
+		})
 	}
+}
+
+// hasRunProfile reports whether a profile was kept for a run.
+func hasRunProfile(p *Pulse, runID string) bool {
+	store, ok := p.storage.(testRunProfileStore)
+	if !ok {
+		return false
+	}
+	data, _, err := store.testRunProfile(runID)
+	return err == nil && len(data) > 0
 }
 
 // --- Settings & Data ---

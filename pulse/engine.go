@@ -75,6 +75,10 @@ type Pulse struct {
 	// Database.ExplainSlowQueries is on (see explain.go).
 	explainer *explainer
 
+	// runProfiler captures a CPU profile over a registered load-test run
+	// (see testrun_profile.go).
+	runProfiler *runProfiler
+
 	// Runtime sampler
 	runtimeSampler *RuntimeSampler
 

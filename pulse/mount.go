@@ -210,6 +210,9 @@ func Mount(ctx context.Context, router *gin.Engine, db *gorm.DB, opts ...Option)
 	if boolValue(cfg.Profiling.Enabled) {
 		p.profileSampler = newProfileSampler(p)
 	}
+	// Always built: registering a test run has to work whether or not
+	// profiling is on, and the profiler itself declines when it is off.
+	p.runProfiler = newRunProfiler(p)
 
 	// The runtime keeps mutex and block profiling off until asked, because
 	// both cost a little while on. Only turn them on when profiling is

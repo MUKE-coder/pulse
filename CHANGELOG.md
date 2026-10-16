@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — a flame graph of the load test itself (#11)
+
+- When a run's **start** is registered (`POST /test-runs` with no
+  `ended_at`) and profiling is enabled, Pulse starts a CPU profile; when
+  the run's end is registered, it stops and keeps it against the run.
+  `GET /pulse/api/test-runs/:id/profile` serves it as pprof protobuf for
+  `go tool pprof`, or as `?format=svg` for the flame graph the Test Runs
+  page now shows beside the comparison. k6 can say p95 went from 40ms to
+  310ms; this says which function those 310ms were in.
+- Guardrails: only when profiling is already on through both of its gates,
+  only one profile at a time across the whole process (a run profile and
+  an on-demand flame graph cannot fight over the runtime's single CPU
+  profiler), and it stops itself after `Profiling.MaxTestRunProfile`
+  (default 5m) however long the run turns out to be. The start call's
+  response says whether a profile is being taken.
+- `GET /test-runs/:id/compare` now also carries **per-route** before /
+  during / after with a slowdown ratio — a load test hammers two or three
+  endpoints and a global average hides the one that fell over — and a
+  **database** block with queries per request and N+1 findings in each
+  window, because an N+1 that is invisible at one request a second is
+  exactly what falls over at 500 VUs.
+- Per-route latency is reported as an average, not a percentile: per-route
+  percentiles are not kept per minute, and a mislabelled number is worse
+  than an honest one.
+- The k6 bridge that registers runs already shipped in
+  `examples/k6/pulse-k6-bridge.js`; it is now documented next to the
+  profile feature it turns on, and the Test Runs page points at it.
+
 ### Fixed — the flame graph now shows CPU by default (#10)
 
 - The page sampled goroutine stacks, so a goroutine parked in a network

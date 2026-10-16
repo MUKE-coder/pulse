@@ -133,8 +133,13 @@ type ProfilingConfig struct {
 	// MaxDuration caps the sample window length the API will accept. Zero
 	// means "no cap". Default: 60s.
 	MaxDuration time.Duration
-	// SampleHz is the per-second stack sample rate. Default: 100.
+	// SampleHz is the per-second stack sample rate for the goroutine
+	// profile. Default: 100. The runtime picks the CPU profile's rate.
 	SampleHz int
+	// MaxTestRunProfile caps the CPU profile Pulse captures over a
+	// registered load-test run (default: 5m). The profile stops itself at
+	// this point however long the run turns out to be.
+	MaxTestRunProfile time.Duration
 
 	// MutexProfileFraction turns on the runtime's mutex profile: one in
 	// every N contention events is sampled (0: off, the default). It is

@@ -487,6 +487,12 @@ CREATE TABLE IF NOT EXISTS query_plans (
 );
 CREATE INDEX IF NOT EXISTS idx_query_plans_captured ON query_plans (captured_at);
 
+CREATE TABLE IF NOT EXISTS test_run_profiles (
+	run_id      TEXT PRIMARY KEY,
+	captured_at INTEGER NOT NULL,
+	profile     BLOB    NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS slo_rollups (
 	minute INTEGER NOT NULL,
 	slo    TEXT    NOT NULL,
@@ -1583,7 +1589,7 @@ func (s *sqlStore) Reset() error {
 	tables := []string{"requests", "queries", "runtime_samples", "errors",
 		"health_results", "alerts", "dependencies", "n1_detections", "test_runs",
 		"request_rollups", "latency_rollups", "slo_rollups", "logs", "route_hours",
-		"query_plans"}
+		"query_plans", "test_run_profiles"}
 	for _, t := range tables {
 		if _, err := s.exec(`DELETE FROM ` + t); err != nil {
 			return fmt.Errorf("pulse/sqlite reset %s: %w", t, err)

@@ -54,7 +54,7 @@ Pulse gives you full visibility into your application's HTTP requests, database 
 - **Query plans for slow queries** — Opt in and Pulse asks the database why a slow `SELECT` is slow, reading the sequential scan or the filesort off the plan. `EXPLAIN` only, one plan per pattern per hour, off the request path.
 - **Per-route baselines** — Each route's hourly p95 is summarised and kept for 30 days, so Pulse can say a route *got slower*, not just that it is slow. A sustained regression against the median of the last week pages once, with the numbers to decide on a rollback.
 - **Secret redaction** — Passwords, tokens, card numbers, JWTs and keys are stripped from captured request context, error messages and outbound URLs before anything is stored, whatever the field name or naming style. Configurable.
-- **Load-test overlay** — k6 (or any harness) runs appear as bands on the dashboard timelines, with a before/during/after comparison and time to recovery.
+- **Load-test overlay** — k6 (or any harness) runs appear as bands on the dashboard timelines, with a before/during/after comparison per route, query and N+1 deltas, time to recovery, and a CPU profile captured over the run so you can see *which function* got slow under load.
 - **Knows its own limits** — Alerts when buffer capacity rather than your retention setting limits history, when writes are dropped, and after an unclean restart. Pulse's own failures are counted and exported.
 - **Dependency Monitoring** — Wrap any `http.Client` to track external API latency, error rates, and availability.
 - **WebSocket Live Updates** — Real-time streaming of requests, errors, health checks, alerts, and runtime metrics to connected clients with per-client channel subscriptions.
@@ -665,6 +665,33 @@ export function teardown(data) {
 
 The bridge ([`examples/k6/pulse-k6-bridge.js`](examples/k6/pulse-k6-bridge.js)) and a runnable example ([`examples/k6/example-test.js`](examples/k6/example-test.js)) ship in the repo.
 
+#### A flame graph of the run itself
+
+k6 can tell you p95 went from 40ms to 310ms at 500 VUs. It cannot tell you *which function*, and neither can an external APM at the resolution that matters. Pulse is inside the process, so it can.
+
+When a run is registered as **starting** (a `POST /test-runs` with no `ended_at`) and profiling is enabled, Pulse starts a CPU profile; when the run's end is registered, it stops and keeps it against the run:
+
+```bash
+# the flame graph of the run, in the browser
+open "http://localhost:8080/pulse/api/test-runs/$RUN_ID/profile?format=svg"
+
+# or the raw profile, for go tool pprof
+curl -H "Authorization: Bearer $TOKEN"   "http://localhost:8080/pulse/api/test-runs/$RUN_ID/profile" > run.pprof
+go tool pprof -list 'normalise' run.pprof
+```
+
+The Test Runs page shows it beside the comparison, so the screen reads *"p95 40ms → 310ms during the run, recovered after 95s — and here is where those 310ms went."*
+
+Guardrails: it only happens when profiling is already enabled through [both of its gates](#flame-graph-profiling), only one profile runs at a time across the whole process (an on-demand flame graph and a run profile cannot fight over it), and it stops itself after `Profiling.MaxTestRunProfile` (default 5m) however long the run turns out to be. The response to the start call says whether a profile is being taken.
+
+#### What the comparison says now
+
+Alongside the global before/during/after, `GET /pulse/api/test-runs/:id/compare` carries:
+
+- **`routes`** — the same windows per route, busiest first, with a `slowdown_ratio`. A load test usually hammers two or three endpoints, and a global average hides the one that fell over. Per-route latency is an average rather than a percentile, because per-route percentiles are not kept per minute and a mislabelled number is worse than an honest one.
+- **`database`** — queries per request before against during, N+1 findings in each window, and slow queries during. An N+1 that is invisible at one request per second is exactly the thing that falls over at 500 VUs.
+- **`profile`** — whether a CPU profile was captured, and how big it is.
+
 ### USE method (host U/S/E grid)
 
 Pulse implements Brendan Gregg's [USE method](https://brendangregg.com/usemethod.html) — for every system resource, walk **U**tilization / **S**aturation / **E**rrors. A background sampler refreshes the grid every 5 s (2 s in DevMode), and `GET /pulse/api/use` returns the live snapshot:
@@ -1077,6 +1104,7 @@ All endpoints under `/pulse/api/` require JWT authentication (except login).
 |--------|----------|-------------|
 | `GET` | `/pulse/api/test-runs?range=…` | List test runs whose window overlaps the range |
 | `POST` | `/pulse/api/test-runs` | Record a synthetic test run (k6 bridge POSTs here at run start + end) |
+| `GET` | `/pulse/api/test-runs/:id/profile` | `?format=pprof\|svg\|json` — the CPU profile captured over the run |
 | `GET` | `/pulse/api/test-runs/:id/compare` | Before / during / after comparison of production traffic, and time to recovery |
 
 ### Storage and lifecycle
