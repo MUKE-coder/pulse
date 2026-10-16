@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.1] — 2026-10-16
+
+A fix to the bundled k6 bridge, reported from the field after v1.5.0. The
+library itself is unchanged; only `examples/k6/` and the docs move.
+
 ### Fixed — the bundled k6 bridge, after a report from the field (#11)
 
 - Pulse requests now use their own `http.CookieJar`. k6 keeps one jar per
@@ -1171,6 +1176,7 @@ milestones:
   Batched writes for the SQLite backend (move per-call inserts behind a
   channel + worker pool).
 
+[1.5.1]: https://github.com/MUKE-coder/pulse/releases/tag/v1.5.1
 [1.5.0]: https://github.com/MUKE-coder/pulse/releases/tag/v1.5.0
 [1.4.0]: https://github.com/MUKE-coder/pulse/releases/tag/v1.4.0
 [1.3.0]: https://github.com/MUKE-coder/pulse/releases/tag/v1.3.0

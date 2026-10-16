@@ -12,7 +12,7 @@ import (
 )
 
 // Version is the current Pulse SDK version, bumped on each release.
-const Version = "1.5.0"
+const Version = "1.5.1"
 
 // DefaultUsername is the placeholder dashboard username shipped in defaults.
 // In production (DevMode=false) Pulse refuses to start while this value is in
