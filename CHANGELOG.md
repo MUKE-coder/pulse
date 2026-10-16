@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-10-16
+
+Query plans, rebuilt around an idea borrowed from pg-guard: a statement can
+be planned without the values it ran with. The Run EXPLAIN button answers
+immediately instead of waiting for the query to come round again, plans are
+read as JSON rather than scraped from text, and the catalog decides whether
+a scan is worth mentioning at all. API changes are additive only.
+
 ### Changed — query plans, with ideas borrowed from pg-guard
 
 [pg-guard](https://github.com/iyiola-dev/pg-guard) is a static Postgres
@@ -1211,6 +1219,7 @@ milestones:
   Batched writes for the SQLite backend (move per-call inserts behind a
   channel + worker pool).
 
+[1.6.0]: https://github.com/MUKE-coder/pulse/releases/tag/v1.6.0
 [1.5.1]: https://github.com/MUKE-coder/pulse/releases/tag/v1.5.1
 [1.5.0]: https://github.com/MUKE-coder/pulse/releases/tag/v1.5.0
 [1.4.0]: https://github.com/MUKE-coder/pulse/releases/tag/v1.4.0
