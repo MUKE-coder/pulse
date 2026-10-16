@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-10-16
+
+The dashboard, redesigned: one neutral palette with a single accent, a
+light theme that is a first-class citizen, a new shell, and the Database
+page rebuilt as the reference screen. API changes are additive only.
+
 ### Changed — the dashboard, redesigned
 
 - New visual language throughout: a neutral slate palette with a single
@@ -1085,6 +1091,7 @@ milestones:
   Batched writes for the SQLite backend (move per-call inserts behind a
   channel + worker pool).
 
+[1.4.0]: https://github.com/MUKE-coder/pulse/releases/tag/v1.4.0
 [1.3.0]: https://github.com/MUKE-coder/pulse/releases/tag/v1.3.0
 [1.2.0]: https://github.com/MUKE-coder/pulse/releases/tag/v1.2.0
 [1.1.0]: https://github.com/MUKE-coder/pulse/releases/tag/v1.1.0
