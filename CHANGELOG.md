@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-10-16
+
+Three answers that were in the process all along and never reached the
+screen: which line issued an N+1, what is actually burning the CPU, and
+which function got slow under load. API changes are additive only.
+
 ### Added — a flame graph of the load test itself (#11)
 
 - When a run's **start** is registered (`POST /test-runs` with no
@@ -1149,6 +1155,7 @@ milestones:
   Batched writes for the SQLite backend (move per-call inserts behind a
   channel + worker pool).
 
+[1.5.0]: https://github.com/MUKE-coder/pulse/releases/tag/v1.5.0
 [1.4.0]: https://github.com/MUKE-coder/pulse/releases/tag/v1.4.0
 [1.3.0]: https://github.com/MUKE-coder/pulse/releases/tag/v1.3.0
 [1.2.0]: https://github.com/MUKE-coder/pulse/releases/tag/v1.2.0
