@@ -204,10 +204,10 @@ func TestAPI_ExplainNow(t *testing.T) {
 	}
 }
 
-// A statement Pulse cannot run on its own — because the values it was run
-// with are the application's data, not Pulse's — is armed for its next run
-// rather than explained with invented parameters.
-func TestExplainNow_ArmsAParameterisedQuery(t *testing.T) {
+// Pulse keeps the statement but not the values a query ran with, so a
+// parameterised query is planned generically rather than waiting for its
+// next run. The response says which kind of plan came back.
+func TestExplainNow_PlansAParameterisedQueryGenerically(t *testing.T) {
 	db, p := setupTestPulseWithDB(t)
 	gin.SetMode(gin.TestMode)
 	p.config.Dashboard.Username = "admin"
@@ -224,8 +224,6 @@ func TestExplainNow_ArmsAParameterisedQuery(t *testing.T) {
 	var found []TestUser
 	db.Where("age > ?", 5).Find(&found)
 
-	// The background explainer has the values, so let it settle first and
-	// then ask: whatever it captured, the handler must not invent values.
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, authedRequest("POST", "/pulse/api/database/explain", token, ""))
 	if w.Code != http.StatusOK {
@@ -233,17 +231,25 @@ func TestExplainNow_ArmsAParameterisedQuery(t *testing.T) {
 	}
 	var resp struct {
 		Explained bool   `json:"explained"`
-		Armed     bool   `json:"armed"`
+		Generic   bool   `json:"generic"`
 		Message   string `json:"message"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if !resp.Armed || resp.Explained {
-		t.Fatalf("a parameterised query should be armed, not explained: %+v", resp)
+	if !resp.Explained || !resp.Generic {
+		t.Fatalf("a parameterised query should be explained generically: %+v", resp)
 	}
-	if !strings.Contains(resp.Message, "next time it runs") {
-		t.Errorf("the message should say what happens next: %q", resp.Message)
+	if !strings.Contains(resp.Message, "without the values") {
+		t.Errorf("the message should say the plan is generic: %q", resp.Message)
+	}
+
+	plans, err := p.storage.(planStore).queryPlans(10)
+	if err != nil || len(plans) == 0 {
+		t.Fatalf("the plan should have been stored: %v %+v", err, plans)
+	}
+	if !plans[0].Generic {
+		t.Error("the stored plan should be marked generic")
 	}
 }
 

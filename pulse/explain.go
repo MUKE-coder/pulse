@@ -3,8 +3,11 @@ package pulse
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -36,7 +39,13 @@ type QueryPlan struct {
 	Duration      time.Duration `json:"duration"` // the slow run that prompted it
 	Plan          string        `json:"plan"`     // what the database answered
 	Hints         []string      `json:"hints,omitempty"`
-	CapturedAt    time.Time     `json:"captured_at"`
+	// Generic is set when the plan was made without the values the query
+	// ran with. Pulse keeps the statement but never the values, so a plan
+	// asked for after the fact is generic; one captured as the query ran
+	// is not. The planner can choose differently with real values, and the
+	// dashboard says which kind it is showing.
+	Generic    bool      `json:"generic,omitempty"`
+	CapturedAt time.Time `json:"captured_at"`
 }
 
 // planStore is implemented by storage backends that keep query plans.
@@ -118,10 +127,16 @@ func startExplainer(p *Pulse) {
 }
 
 // explain asks the database how it runs the query, and keeps the answer.
+//
+// Pulse keeps the statement but never the values it ran with — those are
+// the application's data. When a live run hands its values over the plan is
+// the real one; otherwise the database plans the statement generically,
+// with no values at all, which every backend can do: PostgreSQL through a
+// prepared statement under force_generic_plan, SQLite and MySQL by binding
+// NULL for each placeholder.
 func (e *explainer) explain(ctx context.Context, job explainJob) {
 	dialect := e.db.Dialector.Name()
-	stmt, ok := explainStatement(dialect, job.sql)
-	if !ok {
+	if _, ok := explainStatement(dialect, job.sql); !ok {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, explainTimeout)
@@ -136,32 +151,151 @@ func (e *explainer) explain(ctx context.Context, job explainJob) {
 		e.pulse.internalError("database: explain", err)
 		return
 	}
-	rows, err := pool.QueryContext(ctx, stmt, job.vars...)
+
+	plan, generic, err := explainQuery(ctx, pool, dialect, job.sql, job.vars)
 	if err != nil {
 		e.pulse.internalError("database: explain", err)
 		return
 	}
-	plan, err := readPlan(rows)
-	_ = rows.Close()
-	if err != nil {
-		e.pulse.internalError("database: explain", err)
-		return
-	}
-	if plan == "" {
+	if plan.text == "" {
 		return
 	}
 	// A plan can echo the values a query filtered on.
-	plan = e.pulse.redactor.scrubValue(plan)
+	text := e.pulse.redactor.scrubValue(plan.text)
 
 	e.pulse.internalError("storage: query plans", e.store(QueryPlan{
 		NormalizedSQL: job.metric.NormalizedSQL,
 		Operation:     job.metric.Operation,
 		Table:         job.metric.Table,
 		Duration:      job.metric.Duration,
-		Plan:          clipString(plan, maxPlanBytes),
-		Hints:         planHints(dialect, plan),
+		Plan:          clipString(text, maxPlanBytes),
+		Hints:         plan.hints,
+		Generic:       generic,
 		CapturedAt:    e.pulse.now(),
 	}))
+}
+
+// planResult is a plan rendered for reading, plus what Pulse read off it.
+type planResult struct {
+	text  string
+	hints []string
+}
+
+// explainQuery plans one statement without running it. Everything happens
+// inside a transaction that is rolled back: EXPLAIN does not execute the
+// query, but a statement can still call a volatile function, and a
+// read-only transaction is a boundary rather than a promise.
+func explainQuery(ctx context.Context, pool *sql.DB, dialect, query string, vars []any) (planResult, bool, error) {
+	params := placeholderCount(query)
+	generic := params > 0 && len(vars) != params
+
+	tx, err := pool.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		// Not every driver takes a read-only transaction; a plain one
+		// still rolls back.
+		if tx, err = pool.BeginTx(ctx, nil); err != nil {
+			return planResult{}, generic, err
+		}
+	}
+	defer tx.Rollback() //nolint:errcheck // rolled back on every path
+
+	switch dialect {
+	case "postgres", "pgx":
+		setExplainLimits(ctx, tx)
+		plan, err := explainPostgres(ctx, tx, query, params, vars, generic)
+		return plan, generic, err
+	case "sqlite", "sqlite3", "mysql":
+		stmt, ok := explainStatement(dialect, query)
+		if !ok {
+			return planResult{}, generic, nil
+		}
+		args := vars
+		if generic {
+			// The drivers refuse a statement with unbound placeholders, so
+			// a plan asked for without values binds NULL for each one.
+			args = make([]any, params)
+		}
+		text, err := queryPlanText(ctx, tx, stmt, args)
+		if err != nil {
+			return planResult{}, generic, err
+		}
+		return planResult{text: text, hints: planHints(dialect, text)}, generic, nil
+	}
+	return planResult{}, generic, nil // a database Pulse doesn't know how to ask
+}
+
+// setExplainLimits keeps a plan from stalling: EXPLAIN still takes the
+// locks the statement needs, and the planner may read statistics.
+func setExplainLimits(ctx context.Context, tx *sql.Tx) {
+	_, _ = tx.ExecContext(ctx, "SET LOCAL statement_timeout = '5s'")
+	_, _ = tx.ExecContext(ctx, "SET LOCAL lock_timeout = '2s'")
+}
+
+// explainPostgres plans a statement as JSON, which carries what the text
+// output only hints at: node types, row estimates, filters and sort
+// methods. A parameterised statement is planned generically through a
+// prepared statement, so Pulse never needs the values it ran with.
+//
+// PostgreSQL 16 can do the same in one statement with
+// EXPLAIN (GENERIC_PLAN), but that form needs the simple query protocol to
+// reach the server intact, and the prepared-statement route works the same
+// way on every version Pulse supports.
+func explainPostgres(ctx context.Context, tx *sql.Tx, query string, params int, vars []any, generic bool) (planResult, error) {
+	const format = "EXPLAIN (FORMAT JSON, VERBOSE) "
+
+	var (
+		raw string
+		err error
+	)
+	switch {
+	case params == 0:
+		raw, err = queryPlanText(ctx, tx, format+query, nil)
+	case !generic:
+		raw, err = queryPlanText(ctx, tx, format+query, vars)
+	default:
+		raw, err = explainPreparedPostgres(ctx, tx, format, query, params)
+	}
+	if err != nil {
+		return planResult{}, err
+	}
+
+	node, perr := parsePostgresPlan(raw)
+	if perr != nil || node == nil {
+		// Unparseable JSON is still worth showing as text.
+		return planResult{text: raw, hints: planHints("postgres", raw)}, nil
+	}
+	return planResult{text: renderPlanTree(node), hints: postgresHints(node)}, nil
+}
+
+// explainPreparedPostgres plans a parameterised statement with no values.
+// force_generic_plan stops the planner building a plan around the NULLs
+// that stand in for them, which would be a plan for a query nobody runs.
+func explainPreparedPostgres(ctx context.Context, tx *sql.Tx, format, query string, params int) (string, error) {
+	// A name per statement, so two explains in one process can't collide.
+	name := "pulse_explain_" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	// Older than PostgreSQL 12 has no plan_cache_mode; the plan then comes
+	// out shaped around the NULLs, so the failure is worth passing on.
+	if _, err := tx.ExecContext(ctx, "SET LOCAL plan_cache_mode = force_generic_plan"); err != nil {
+		return "", err
+	}
+	if _, err := tx.ExecContext(ctx, "PREPARE "+name+" AS "+query); err != nil {
+		return "", err
+	}
+	defer tx.ExecContext(ctx, "DEALLOCATE "+name) //nolint:errcheck // inside a rolled-back tx
+
+	args := strings.TrimSuffix(strings.Repeat("NULL, ", params), ", ")
+	return queryPlanText(ctx, tx, format+"EXECUTE "+name+"("+args+")", nil)
+}
+
+// queryPlanText runs a plan-producing statement and joins what came back.
+func queryPlanText(ctx context.Context, tx *sql.Tx, stmt string, args []any) (string, error) {
+	rows, err := tx.QueryContext(ctx, stmt, args...)
+	if err != nil {
+		return "", err
+	}
+	text, err := readPlan(rows)
+	_ = rows.Close()
+	return text, err
 }
 
 func (e *explainer) store(p QueryPlan) error {
@@ -280,6 +414,241 @@ func planHints(dialect, plan string) []string {
 	return hints
 }
 
+// --- PostgreSQL JSON plans ---
+
+// planNode is the part of a PostgreSQL JSON plan Pulse reads. The text
+// output only hints at these; the JSON carries them outright, which is what
+// lets a hint say "sequential scan on orders, ~1.2M rows, filtering on
+// user_id" rather than repeating a line back.
+type planNode struct {
+	NodeType      string     `json:"Node Type"`
+	Relation      string     `json:"Relation Name"`
+	Schema        string     `json:"Schema"`
+	Alias         string     `json:"Alias"`
+	IndexName     string     `json:"Index Name"`
+	Filter        string     `json:"Filter"`
+	IndexCond     string     `json:"Index Cond"`
+	JoinType      string     `json:"Join Type"`
+	SortMethod    string     `json:"Sort Method"`
+	SortSpaceType string     `json:"Sort Space Type"`
+	SortSpaceKB   int64      `json:"Sort Space Used"`
+	PlanRows      float64    `json:"Plan Rows"`
+	TotalCost     float64    `json:"Total Cost"`
+	ParallelAware bool       `json:"Parallel Aware"`
+	WorkersPlan   int        `json:"Workers Planned"`
+	Plans         []planNode `json:"Plans"`
+}
+
+func parsePostgresPlan(raw string) (*planNode, error) {
+	var plans []struct {
+		Plan planNode `json:"Plan"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &plans); err != nil {
+		return nil, err
+	}
+	if len(plans) == 0 {
+		return nil, nil
+	}
+	return &plans[0].Plan, nil
+}
+
+// renderPlanTree prints the plan the way psql does, which is what someone
+// reading the page expects to see.
+func renderPlanTree(root *planNode) string {
+	var b strings.Builder
+	var walk func(n *planNode, depth int)
+	walk = func(n *planNode, depth int) {
+		if n == nil {
+			return
+		}
+		b.WriteString(strings.Repeat("  ", depth))
+		if depth > 0 {
+			b.WriteString("-> ")
+		}
+		b.WriteString(n.NodeType)
+		if n.Relation != "" {
+			b.WriteString(" on " + n.Relation)
+			if n.Alias != "" && n.Alias != n.Relation {
+				b.WriteString(" " + n.Alias)
+			}
+		}
+		if n.IndexName != "" {
+			b.WriteString(" using " + n.IndexName)
+		}
+		fmt.Fprintf(&b, "  (rows=%s cost=%.2f)", formatRowEstimate(n.PlanRows), n.TotalCost)
+		if n.Filter != "" {
+			b.WriteString("\n" + strings.Repeat("  ", depth+1) + "Filter: " + n.Filter)
+		}
+		if n.IndexCond != "" {
+			b.WriteString("\n" + strings.Repeat("  ", depth+1) + "Index Cond: " + n.IndexCond)
+		}
+		if n.SortMethod != "" {
+			fmt.Fprintf(&b, "\n%sSort Method: %s", strings.Repeat("  ", depth+1), n.SortMethod)
+			if n.SortSpaceType != "" {
+				fmt.Fprintf(&b, "  %s: %dkB", n.SortSpaceType, n.SortSpaceKB)
+			}
+		}
+		b.WriteString("\n")
+		for i := range n.Plans {
+			walk(&n.Plans[i], depth+1)
+		}
+	}
+	walk(root, 0)
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func formatRowEstimate(rows float64) string {
+	switch {
+	case rows >= 1e6:
+		return fmt.Sprintf("%.1fM", rows/1e6)
+	case rows >= 1e3:
+		return fmt.Sprintf("%.0fk", rows/1e3)
+	default:
+		return strconv.FormatFloat(rows, 'f', -1, 64)
+	}
+}
+
+// bigScanRows is where a sequential scan stops being a detail and starts
+// being the answer. Below it the planner is usually right.
+const bigScanRows = 10_000
+
+// postgresHints reads the handful of things that most often explain a slow
+// query off the plan tree. Walking the tree rather than the text means a
+// scan buried under a join or a sort is still found, a scan a LIMIT stops
+// early is not reported, and a parallel scan's rows are counted the way the
+// planner counts them.
+func postgresHints(root *planNode) []string {
+	var hints []string
+	add := func(h string) {
+		for _, seen := range hints {
+			if seen == h {
+				return
+			}
+		}
+		if len(hints) < maxPlanHints {
+			hints = append(hints, h)
+		}
+	}
+
+	var walk func(n *planNode, limited bool, workers int)
+	walk = func(n *planNode, limited bool, workers int) {
+		if n == nil {
+			return
+		}
+		switch n.NodeType {
+		case "Seq Scan":
+			rows := n.PlanRows
+			if n.ParallelAware {
+				rows *= parallelRowDivisor(workers)
+			}
+			// A LIMIT above the scan can stop it before it reads the table.
+			if !limited && rows >= bigScanRows {
+				where := n.Relation
+				if where == "" {
+					where = "a table"
+				}
+				if cols := filterColumns(n.Filter); len(cols) > 0 {
+					add(fmt.Sprintf("sequential scan on %s (~%s rows) filtering on %s: consider an index on %s(%s)",
+						where, formatRowEstimate(rows), strings.Join(cols, ", "), where, strings.Join(cols, ", ")))
+				} else {
+					add(fmt.Sprintf("reads all of %s (~%s rows) with a sequential scan",
+						where, formatRowEstimate(rows)))
+				}
+			}
+		case "Limit":
+			limited = true
+		case "Gather", "Gather Merge":
+			workers = n.WorkersPlan
+		case "Result", "Append", "Subquery Scan":
+			// These stream rows, so a LIMIT above them still stops the
+			// scan below early.
+		default:
+			limited = false
+		}
+
+		if strings.Contains(strings.ToLower(n.SortMethod), "external") ||
+			strings.EqualFold(n.SortSpaceType, "Disk") {
+			add("the sort spilled to disk: raise work_mem, or index the ORDER BY")
+		}
+		if n.NodeType == "Nested Loop" && n.PlanRows >= bigScanRows {
+			add(fmt.Sprintf("nested loop over ~%s rows: check the join condition is indexed",
+				formatRowEstimate(n.PlanRows)))
+		}
+
+		for i := range n.Plans {
+			walk(&n.Plans[i], limited, workers)
+		}
+	}
+	walk(root, false, 0)
+	return hints
+}
+
+// parallelRowDivisor mirrors how the planner splits a parallel scan's rows
+// between the workers and the leader, so a parallel scan isn't reported as
+// smaller than it is.
+func parallelRowDivisor(workers int) float64 {
+	if workers <= 0 {
+		return 1
+	}
+	leader := 1 - 0.3*float64(workers)
+	if leader < 0 {
+		leader = 0
+	}
+	return float64(workers) + leader
+}
+
+// filterColumns picks the column names out of a plan filter, which is what
+// an index would have to cover: "((user_id = $1) AND (status = 'paid'))"
+// gives user_id and status.
+func filterColumns(filter string) []string {
+	var cols []string
+	seen := map[string]bool{}
+	for i := 0; i < len(filter); i++ {
+		c := filter[i]
+		if !isIdentStart(c) {
+			continue
+		}
+		j := i
+		for j < len(filter) && isIdentPart(filter[j]) {
+			j++
+		}
+		word := filter[i:j]
+		i = j
+		// Only words compared against something are candidates, and a
+		// qualified name keeps its column half.
+		if k := strings.LastIndexByte(word, '.'); k >= 0 {
+			word = word[k+1:]
+		}
+		rest := strings.TrimLeft(filter[i:], " ")
+		if word == "" || seen[word] || sqlKeyword(word) {
+			continue
+		}
+		if strings.HasPrefix(rest, "=") || strings.HasPrefix(rest, ">") ||
+			strings.HasPrefix(rest, "<") || strings.HasPrefix(rest, "IS ") ||
+			strings.HasPrefix(rest, "ANY") || strings.HasPrefix(rest, "~~") {
+			seen[word] = true
+			cols = append(cols, word)
+		}
+	}
+	return cols
+}
+
+func isIdentStart(c byte) bool {
+	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+func isIdentPart(c byte) bool {
+	return isIdentStart(c) || (c >= '0' && c <= '9') || c == '.'
+}
+
+func sqlKeyword(word string) bool {
+	switch strings.ToUpper(word) {
+	case "AND", "OR", "NOT", "NULL", "IS", "ANY", "ALL", "TRUE", "FALSE", "CASE", "WHEN", "THEN", "ELSE", "END":
+		return true
+	}
+	return false
+}
+
 // --- MemoryStorage ---
 
 // maxStoredPlans caps the plans the Memory backend keeps, one per pattern.
@@ -329,13 +698,14 @@ func (s *sqlStore) storeQueryPlan(p QueryPlan) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	if _, err := s.exec(`INSERT INTO query_plans
-		(normalized_sql, operation, table_name, duration_ns, plan, hints, captured_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		(normalized_sql, operation, table_name, duration_ns, plan, hints, captured_at, generic)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (normalized_sql) DO UPDATE SET operation = excluded.operation,
 		    table_name = excluded.table_name, duration_ns = excluded.duration_ns,
-		    plan = excluded.plan, hints = excluded.hints, captured_at = excluded.captured_at`,
+		    plan = excluded.plan, hints = excluded.hints, captured_at = excluded.captured_at,
+		    generic = excluded.generic`,
 		p.NormalizedSQL, p.Operation, p.Table, int64(p.Duration), p.Plan,
-		strings.Join(p.Hints, "\n"), p.CapturedAt.UnixNano()); err != nil {
+		strings.Join(p.Hints, "\n"), p.CapturedAt.UnixNano(), boolToInt(p.Generic)); err != nil {
 		return err
 	}
 	// Keep the newest captures, so a long-running process doesn't collect a
@@ -354,7 +724,7 @@ func (s *sqlStore) queryPlans(limit int) ([]QueryPlan, error) {
 		limit = 20
 	}
 	rows, err := s.query(`SELECT normalized_sql, operation, table_name, duration_ns, plan, hints,
-		captured_at FROM query_plans ORDER BY captured_at DESC LIMIT ?`, limit)
+		captured_at, generic FROM query_plans ORDER BY captured_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -366,13 +736,15 @@ func (s *sqlStore) queryPlans(limit int) ([]QueryPlan, error) {
 			duration int64
 			hints    string
 			captured int64
+			generic  int
 		)
 		if err := rows.Scan(&plan.NormalizedSQL, &plan.Operation, &plan.Table, &duration,
-			&plan.Plan, &hints, &captured); err != nil {
+			&plan.Plan, &hints, &captured, &generic); err != nil {
 			return nil, err
 		}
 		plan.Duration = time.Duration(duration)
 		plan.CapturedAt = time.Unix(0, captured)
+		plan.Generic = generic != 0
 		if hints != "" {
 			plan.Hints = strings.Split(hints, "\n")
 		}
@@ -463,26 +835,22 @@ func explainNowHandler(p *Pulse) gin.HandlerFunc {
 		e.mu.Unlock()
 
 		// Recorded queries keep the statement but not the values it ran
-		// with — those are the application's data, and Pulse does not store
-		// them. A statement with no placeholders can be explained right
-		// here; one with placeholders has to wait for its next run, when
-		// the GORM callback has the values to bind.
-		if placeholderCount(pick.SQL) > 0 {
-			c.JSON(http.StatusOK, gin.H{
-				"explained": false,
-				"armed":     true,
-				"query":     pick.NormalizedSQL,
-				"message": "This query takes parameters, and Pulse does not keep the values it ran with. " +
-					"Its plan will be captured the next time it runs.",
-			})
-			return
-		}
-
+		// with — those are the application's data. A parameterised
+		// statement is planned generically instead, so this answers now
+		// rather than waiting for the query to come round again.
 		e.explain(c.Request.Context(), explainJob{metric: *pick, sql: pick.SQL})
-		c.JSON(http.StatusOK, gin.H{
+
+		generic := placeholderCount(pick.SQL) > 0
+		resp := gin.H{
 			"explained": true,
 			"query":     pick.NormalizedSQL,
 			"duration":  pick.Duration,
-		})
+			"generic":   generic,
+		}
+		if generic {
+			resp["message"] = "Planned without the values it ran with, which Pulse does not keep. " +
+				"The planner can choose differently with real values."
+		}
+		c.JSON(http.StatusOK, resp)
 	}
 }

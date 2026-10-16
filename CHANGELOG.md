@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — query plans, with ideas borrowed from pg-guard
+
+[pg-guard](https://github.com/iyiola-dev/pg-guard) is a static Postgres
+linter for Go that validates extracted SQL against a live database. It
+solves, at CI time, the problem Pulse hit at runtime: how to plan a
+statement you have no values for. Three of its techniques are now here.
+
+- **Parameterised queries are planned generically**, so Pulse never needs
+  the values a query ran with — which it deliberately does not keep.
+  PostgreSQL goes through a prepared statement under
+  `plan_cache_mode = force_generic_plan` (what `EXPLAIN (GENERIC_PLAN)`
+  does in one step on 16+); SQLite and MySQL bind `NULL` per placeholder.
+  The **Run EXPLAIN** button therefore answers immediately instead of
+  arming the query for its next run, and any recorded query can be
+  explained after the fact.
+- A plan made without values is marked `generic` and labelled as such on
+  the dashboard, because the planner can choose differently when it knows
+  the values. A plan captured while the query ran still uses that run's
+  own values.
+- **EXPLAIN now runs inside a read-only transaction that is rolled back**,
+  with `statement_timeout` and `lock_timeout` set on PostgreSQL. EXPLAIN
+  does not execute the query, but a statement can still call a volatile
+  function, and a plan should not wait behind a lock.
+- **PostgreSQL plans are read as JSON** rather than scraped from text.
+  Pulse walks the node tree, so a scan under a join or a sort is still
+  found, a scan a `LIMIT` stops early is no longer reported, and a
+  parallel scan's rows are counted the way the planner counts them. The
+  hint names the index that would serve the filter — *"sequential scan on
+  orders (~1.2M rows) filtering on user_id, status: consider an index on
+  orders(user_id, status)"* — and says nothing about a column wrapped in a
+  function, where a plain index would not be used.
+
 ## [1.5.1] — 2026-10-16
 
 A fix to the bundled k6 bridge, reported from the field after v1.5.0. The

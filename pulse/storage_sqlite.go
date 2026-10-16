@@ -483,7 +483,8 @@ CREATE TABLE IF NOT EXISTS query_plans (
 	duration_ns    INTEGER NOT NULL DEFAULT 0,
 	plan           TEXT    NOT NULL,
 	hints          TEXT    NOT NULL DEFAULT '',
-	captured_at    INTEGER NOT NULL
+	captured_at    INTEGER NOT NULL,
+	generic        INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_query_plans_captured ON query_plans (captured_at);
 
@@ -539,6 +540,7 @@ var sqliteAddedColumns = []struct{ table, column, definition string }{
 	{"errors", "span_id", "TEXT NOT NULL DEFAULT ''"},              // v1.2
 	{"n1_detections", "caller_file", "TEXT NOT NULL DEFAULT ''"},   // v1.4.1
 	{"n1_detections", "caller_line", "INTEGER NOT NULL DEFAULT 0"}, // v1.4.1
+	{"query_plans", "generic", "INTEGER NOT NULL DEFAULT 0"},       // v1.5.2
 }
 
 // migrateSQLiteColumns adds any column in sqliteAddedColumns that the

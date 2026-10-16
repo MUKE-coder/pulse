@@ -101,12 +101,12 @@ export default function DatabasePage() {
       const data = await res.json()
       if (!res.ok) setNotice(data.hint || data.error || 'EXPLAIN is unavailable')
       else if (data.explained) {
-        setNotice(`Captured the plan for ${data.query}`)
+        setNotice(data.generic
+          ? `Captured a generic plan for ${data.query} — planned without the values it ran with.`
+          : `Captured the plan for ${data.query}`)
         setTab('plans')
       } else {
-        // Armed, or nothing to explain yet: either way say what happens next.
         setNotice(data.message)
-        if (data.armed) setTab('plans')
       }
       const planRes = await get('/database/plans?limit=50')
       if (planRes.ok) setPlans(await planRes.json())
@@ -439,8 +439,14 @@ ${d.suggested_fix}` : d.pattern}>
                     <code className="mono" style={{ fontSize: 12, wordBreak: 'break-all' }}>
                       {plan.normalized_sql}
                     </code>
-                    <span className="mono warn" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
-                      {ms(plan.duration)}
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 8, whiteSpace: 'nowrap' }}>
+                      {plan.generic ? (
+                        <span className="badge badge-neutral"
+                          title="Planned without the values the query ran with — Pulse does not keep those. The planner can choose differently with real values.">
+                          generic plan
+                        </span>
+                      ) : null}
+                      <span className="mono warn" style={{ fontSize: 12 }}>{ms(plan.duration)}</span>
                     </span>
                   </div>
                   {(plan.hints || []).map((hint) => (

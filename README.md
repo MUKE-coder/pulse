@@ -377,10 +377,30 @@ The guardrails are the point, since this runs queries against your database:
 
 - **`EXPLAIN` only, never `EXPLAIN ANALYZE`** — the slow query is never run a second time.
 - **`SELECT` only.** Explaining a write executes it on some databases, so writes are never explained.
+- **Inside a read-only transaction that is rolled back**, with `statement_timeout` and `lock_timeout` set on PostgreSQL. `EXPLAIN` does not execute the query, but a statement can still call a volatile function, and a plan should never wait behind a lock.
 - **At most one plan per query pattern per `ExplainInterval`** (default an hour), on a background goroutine with a 2s timeout. Nothing happens on the request path, and a full queue drops rather than waits.
 - It goes **straight down the connection pool**, so Pulse's own `EXPLAIN` isn't recorded as one of your queries.
 - Plans are **scrubbed** before storage, like everything else Pulse keeps, because a plan can echo the values a query filtered on.
 - Pulse knows how to ask PostgreSQL, MySQL and SQLite. On any other dialect it asks nothing.
+
+#### Pulse never keeps the values a query ran with
+
+Those are your data. So when a plan is asked for after the fact — the **Run EXPLAIN** button, or any query Pulse has recorded but is not watching run right now — the statement is planned **generically**, with no values at all: PostgreSQL through a prepared statement under `plan_cache_mode = force_generic_plan` (what `EXPLAIN (GENERIC_PLAN)` does in one step on PostgreSQL 16), SQLite and MySQL by binding `NULL` for each placeholder.
+
+A plan captured while the query actually ran uses that run's own values and is the real thing. A generic one may differ, because the planner can choose a different plan when it knows the values, so the dashboard marks it `generic plan` rather than letting you assume otherwise.
+
+#### What Pulse reads off a plan
+
+On PostgreSQL the plan comes back as JSON and Pulse walks the node tree, so a scan buried under a join or a sort is still found, a scan a `LIMIT` stops early is not reported, and a parallel scan's rows are counted the way the planner counts them. The hint then names the index that would serve the filter:
+
+```
+sequential scan on orders (~1.2M rows) filtering on user_id, status:
+consider an index on orders(user_id, status)
+```
+
+A column wrapped in a function (`lower(email)`) yields no column suggestion on purpose — a plain index on `email` would not serve it, and advice that does not work is worse than none.
+
+> **See also:** [pg-guard](https://github.com/iyiola-dev/pg-guard) is a static Postgres linter for Go — it reads the SQL in your source at CI time and checks it against a live database. It catches the N+1 you *wrote*; Pulse catches the one that *ran*, tells you what it cost and, since both report `file:line`, points at the same place. The generic-planning technique above comes from it.
 
 One plan is kept per pattern — always the latest — up to 200, and `GET /pulse/api/database/plans` serves them.
 
