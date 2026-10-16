@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — the bundled k6 bridge, after a report from the field (#11)
+
+- Pulse requests now use their own `http.CookieJar`. k6 keeps one jar per
+  VU, so a script that logs into the application before registering its
+  run was sending that session cookie to Pulse as well, and a
+  double-submit CSRF middleware correctly refused the cookie-bearing POST
+  with no token: `403 CSRF_INVALID` on the login, while the same request
+  in isolation worked.
+- `pulseAuth` returns `null` instead of throwing when the dashboard is
+  unreachable or refuses the credentials, and the other two helpers treat
+  a null token as "skip the overlay". A load test that also runs in CI,
+  where Pulse may be off entirely, should not fail over its observability
+  sidecar.
+- The bridge now prints where the run went: the comparison URL, and the
+  flame-graph URL when the run was profiled.
+
 ## [1.5.0] — 2026-10-16
 
 Three answers that were in the process all along and never reached the

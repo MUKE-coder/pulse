@@ -663,7 +663,10 @@ export function teardown(data) {
 }
 ```
 
-The bridge ([`examples/k6/pulse-k6-bridge.js`](examples/k6/pulse-k6-bridge.js)) and a runnable example ([`examples/k6/example-test.js`](examples/k6/example-test.js)) ship in the repo.
+The bridge ([`examples/k6/pulse-k6-bridge.js`](examples/k6/pulse-k6-bridge.js)) and a runnable example ([`examples/k6/example-test.js`](examples/k6/example-test.js)) ship in the repo. Two things it does deliberately:
+
+- **Its own cookie jar.** k6 keeps one jar per VU, so a script that logs into the application before registering its run sends that session cookie to Pulse too — and a double-submit CSRF middleware correctly refuses a cookie-bearing POST with no token. The dashboard is bearer-token auth and wants no cookies, so the bridge gives Pulse requests a jar of their own.
+- **It never throws.** An unreachable or disabled dashboard returns `null` and the test runs without the overlay, because a load test that also runs in CI should not fail over its observability sidecar.
 
 #### A flame graph of the run itself
 
