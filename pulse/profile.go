@@ -1,26 +1,37 @@
-// Profile sampling + flame graph rendering. Implements the second half of
-// GitHub issue #4.
+// Profile sampling + flame graph rendering.
 //
-// Rather than pulling in github.com/google/pprof to decode the runtime/pprof
-// protobuf, Pulse samples stacks itself from `runtime.GoroutineProfile` at
-// a configurable rate. The resulting samples are folded into the standard
+// Two modes, because they answer different questions:
+//
+//   - CPU: a runtime/pprof CPU profile, folded with each sample weighted by
+//     the time it stands for. This is what a flame graph is usually read
+//     for — which code is burning the machine.
+//   - Goroutines: stacks sampled from runtime.GoroutineProfile at a chosen
+//     rate. Good for finding leaks and stuck workers, but a goroutine
+//     parked in a network read counts on every tick while using no CPU, so
+//     parked stacks are folded away unless asked for.
+//
+// Either way the samples are folded into the standard
 // "stack;trace;path count" format that Brendan Gregg's flamegraph.pl
 // understands, then rendered to SVG directly so callers don't need Perl or
 // any external tooling installed.
 package pulse
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"html"
 	"os"
 	"runtime"
+	"runtime/pprof"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"github.com/google/pprof/profile"
 	"time"
 )
 
@@ -82,6 +93,15 @@ func newProfileSampler(p *Pulse) *profileSampler {
 // code paths rather than literal CPU time — which, per Brendan Gregg, is
 // usually what operators want when chasing a regression.
 func (s *profileSampler) Sample(ctx context.Context, duration time.Duration, hz int) (*FlameNode, error) {
+	return s.SampleGoroutines(ctx, duration, hz, false)
+}
+
+// SampleGoroutines samples goroutine stacks. With includeParked false —
+// the default the dashboard uses — goroutines sitting in a network read, a
+// channel or a lock are left out, because they contribute a sample on
+// every tick while consuming nothing, and they are what buries the working
+// code in a goroutine flame graph.
+func (s *profileSampler) SampleGoroutines(ctx context.Context, duration time.Duration, hz int, includeParked bool) (*FlameNode, error) {
 	if s == nil || !profilingPermitted(s.pulse.config) {
 		return nil, errProfilingDisabled
 	}
@@ -131,6 +151,15 @@ func (s *profileSampler) Sample(ctx context.Context, duration time.Duration, hz 
 			if len(stack) == 0 {
 				continue
 			}
+			if !includeParked && isParkedStack(stack) {
+				continue
+			}
+			// The goroutine taking the profile is this one. Counting it
+			// makes Pulse's own sampling loop the widest tower in its own
+			// flame graph.
+			if isSamplingStack(stack) {
+				continue
+			}
 			addStackToTree(root, stack)
 			frames += len(stack)
 		}
@@ -147,6 +176,116 @@ func (s *profileSampler) Sample(ctx context.Context, duration time.Duration, hz 
 	s.mu.Unlock()
 
 	return root, nil
+}
+
+// SampleCPU runs a CPU profile for the requested duration and folds it into
+// the same tree the goroutine sampler produces, weighted by CPU time rather
+// than by how many goroutines happened to be sitting in a frame.
+//
+// This is what a flame graph is usually read for: a goroutine parked in a
+// network read for the whole window shows up as the widest tower in a
+// goroutine profile while using no CPU at all, which buries the code that
+// is actually burning the machine (see issue #10).
+func (s *profileSampler) SampleCPU(ctx context.Context, duration time.Duration) (*FlameNode, error) {
+	if s == nil || !profilingPermitted(s.pulse.config) {
+		return nil, errProfilingDisabled
+	}
+	if !s.running.CompareAndSwap(false, true) {
+		return nil, errProfileInFlight
+	}
+	defer s.running.Store(false)
+
+	duration = s.clampDuration(duration)
+
+	var buf bytes.Buffer
+	if err := pprof.StartCPUProfile(&buf); err != nil {
+		// Something else in the process holds the CPU profiler — the
+		// runtime allows only one at a time.
+		return nil, fmt.Errorf("%w: %v", errProfileInFlight, err)
+	}
+
+	select {
+	case <-ctx.Done():
+		pprof.StopCPUProfile()
+		return nil, ctx.Err()
+	case <-time.After(duration):
+		pprof.StopCPUProfile()
+	}
+
+	root, frames, err := foldCPUProfile(buf.Bytes())
+	if err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	s.last = root
+	s.lastTaken = time.Now()
+	s.lastDur = duration
+	s.lastHz = 0 // the runtime picks the CPU sampling rate, nominally 100Hz
+	s.lastFrames = frames
+	s.mu.Unlock()
+
+	return root, nil
+}
+
+// clampDuration applies the configured default and maximum.
+func (s *profileSampler) clampDuration(duration time.Duration) time.Duration {
+	if duration <= 0 {
+		duration = s.pulse.config.Profiling.DefaultDuration
+	}
+	if duration <= 0 {
+		duration = 5 * time.Second
+	}
+	if max := s.pulse.config.Profiling.MaxDuration; max > 0 && duration > max {
+		duration = max
+	}
+	return duration
+}
+
+// foldCPUProfile turns a pprof protobuf into the flame tree. Each sample
+// carries the nanoseconds it accounts for, so the widths are CPU time.
+func foldCPUProfile(raw []byte) (*FlameNode, int, error) {
+	prof, err := profile.ParseData(raw)
+	if err != nil {
+		return nil, 0, fmt.Errorf("parse cpu profile: %w", err)
+	}
+
+	// A CPU profile has two values per sample: count, then nanoseconds.
+	valueIndex := 0
+	for i, st := range prof.SampleType {
+		if st.Type == "cpu" && st.Unit == "nanoseconds" {
+			valueIndex = i
+		}
+	}
+
+	root := &FlameNode{Name: "all", Children: map[string]*FlameNode{}}
+	frames := 0
+	for _, sample := range prof.Sample {
+		if valueIndex >= len(sample.Value) {
+			continue
+		}
+		weight := int(sample.Value[valueIndex] / int64(time.Microsecond)) // µs of CPU
+		if weight <= 0 {
+			continue
+		}
+		// pprof lists locations leaf-first; the tree wants root-first.
+		stack := make([]string, 0, len(sample.Location))
+		for i := len(sample.Location) - 1; i >= 0; i-- {
+			for j := len(sample.Location[i].Line) - 1; j >= 0; j-- {
+				fn := sample.Location[i].Line[j].Function
+				if fn == nil || skipFlameFrame(fn.Name) {
+					continue
+				}
+				stack = append(stack, shortenFunctionName(fn.Name))
+			}
+		}
+		if len(stack) == 0 {
+			continue
+		}
+		addStackToTreeWeighted(root, stack, weight)
+		frames += len(stack)
+	}
+	return root, frames, nil
 }
 
 // Cached returns the most recent sample tree if it was taken within
@@ -218,17 +357,68 @@ func shortenFunctionName(fn string) string {
 }
 
 func addStackToTree(root *FlameNode, stack []string) {
+	addStackToTreeWeighted(root, stack, 1)
+}
+
+// addStackToTreeWeighted adds a stack worth more than one sample, which is
+// what a CPU profile gives: each sample carries the nanoseconds it stands
+// for, so a frame's width is time rather than a count of observations.
+func addStackToTreeWeighted(root *FlameNode, stack []string, weight int) {
+	if weight <= 0 {
+		return
+	}
 	cur := root
-	cur.Value++
+	cur.Value += weight
 	for _, name := range stack {
 		child, ok := cur.Children[name]
 		if !ok {
 			child = &FlameNode{Name: name, Children: map[string]*FlameNode{}}
 			cur.Children[name] = child
 		}
-		child.Value++
+		child.Value += weight
 		cur = child
 	}
+}
+
+// parkedLeaves are the runtime frames a goroutine sits in while it is
+// waiting for something: a network read, a channel, a lock, a timer. A
+// goroutine parked in one of these for the whole window contributes a
+// sample on every tick while using no CPU at all, which is why they
+// dominate a goroutine flame graph and why folding them is the default.
+var parkedLeaves = []string{
+	"netpollblock", "runtime_pollWait", "gopark", "selectgo", "chanrecv",
+	"chansend", "notesleep", "semacquire", "Semacquire", "futexsleep",
+	"runtime_Semacquire", "runtime_SemacquireMutex", "stopTheWorld",
+	"timerproc", "sigNoteSleep", "epollwait", "kevent", "usleep",
+}
+
+// isSamplingStack reports whether a stack belongs to the request that is
+// taking this profile.
+func isSamplingStack(stack []string) bool {
+	for i := len(stack) - 1; i >= 0 && i >= len(stack)-4; i-- {
+		if strings.Contains(stack[i], "GoroutineProfile") || strings.Contains(stack[i], "goroutineProfile") {
+			return true
+		}
+	}
+	return false
+}
+
+// isParkedStack reports whether a stack's deepest frames are a goroutine
+// waiting rather than working.
+func isParkedStack(stack []string) bool {
+	if len(stack) == 0 {
+		return false
+	}
+	// Look at the last few frames: the leaf is the park itself, and the
+	// one above it is usually the runtime helper that parked it.
+	for i := len(stack) - 1; i >= 0 && i >= len(stack)-3; i-- {
+		for _, parked := range parkedLeaves {
+			if strings.Contains(stack[i], parked) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // --- folded format ---

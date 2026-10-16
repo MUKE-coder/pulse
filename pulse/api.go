@@ -793,7 +793,21 @@ func runOrCacheProfile(c *gin.Context, p *Pulse) (*FlameNode, int, error) {
 	dur, _ := time.ParseDuration(c.Query("duration"))
 	hz := queryInt(c, "hz", 0)
 
-	root, err := p.profileSampler.Sample(c.Request.Context(), dur, hz)
+	// CPU is the default: a flame graph is usually read to find what is
+	// burning the machine, and goroutine stacks answer a different
+	// question (see issue #10). ?mode=goroutines asks the other one, and
+	// ?parked=true keeps the waiting goroutines in it.
+	var (
+		root *FlameNode
+		err  error
+	)
+	switch c.DefaultQuery("mode", "cpu") {
+	case "goroutines", "goroutine":
+		root, err = p.profileSampler.SampleGoroutines(c.Request.Context(), dur, hz,
+			c.Query("parked") == "true")
+	default:
+		root, err = p.profileSampler.SampleCPU(c.Request.Context(), dur)
+	}
 	if err != nil {
 		// Already-running is a 409, anything else (config flip mid-flight
 		// etc.) is a 503.

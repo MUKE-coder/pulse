@@ -585,9 +585,13 @@ export PULSE_PROFILE_ENABLED=true   # gate 2
 Either gate alone returns `503` with a hint at the missing one. With both set:
 
 ```bash
-# 10-second window at 100 Hz, returned as SVG
+# 10-second CPU profile, returned as SVG
 curl -H "Authorization: Bearer $TOKEN" \
-  http://localhost:8080/pulse/api/profile/flamegraph > flame.svg
+  "http://localhost:8080/pulse/api/profile/flamegraph?duration=10s" > flame.svg
+
+# Goroutine stacks instead, including the ones parked in a read or a channel
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8080/pulse/api/profile/flamegraph?mode=goroutines&hz=100&parked=true" > goroutines.svg
 
 # 5-second window, returned as folded text for diff-flame tooling
 curl -H "Authorization: Bearer $TOKEN" \
@@ -596,9 +600,9 @@ curl -H "Authorization: Bearer $TOKEN" \
   | ./flamegraph.pl --colors=red > diff.svg
 ```
 
-Only one sample window is active at a time. Concurrent requests get `409 Conflict` — running two profiles simultaneously doubles CPU cost and produces overlapping noise. Override the defaults in code via `Config.Profiling.DefaultDuration`, `Config.Profiling.MaxDuration`, `Config.Profiling.SampleHz`.
+Only one sample window is active at a time. Concurrent requests get `409 Conflict` — running two profiles simultaneously doubles CPU cost and produces overlapping noise. Override the defaults in code via `Config.Profiling.DefaultDuration`, `Config.Profiling.MaxDuration`, `Config.Profiling.SampleHz` (goroutine mode only — the runtime picks the CPU sampling rate).
 
-> **Why `runtime.GoroutineProfile` for the flame graph?** It needs no pprof protobuf, no extra dependency and no tooling to read — a flame graph in the browser, always available once gated on. What it cannot answer is what allocates and what contends, because neither is in a goroutine stack dump, and it cannot give true CPU attribution, because a goroutine blocked in a syscall weighs the same as one burning processor. For those, Pulse serves the runtime's own profiles.
+> **Why two modes?** A goroutine stack dump is cheap and answers "what is everything doing" — leaks, stuck workers, a pool that stopped draining. What it cannot do is attribute CPU, because a goroutine blocked in a syscall weighs exactly as much as one burning a core; that is what CPU mode is for. Neither answers what allocates or what contends, because neither is in a stack dump at all. For those, Pulse serves the runtime's own profiles.
 
 #### The runtime's profiles, for `go tool pprof`
 

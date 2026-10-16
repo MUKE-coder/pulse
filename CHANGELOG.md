@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — the flame graph now shows CPU by default (#10)
+
+- The page sampled goroutine stacks, so a goroutine parked in a network
+  read counted on every tick while using no CPU, and the widest towers on
+  a "flame graph" were the things using none of the resource it is read
+  for. The CPU-hot code was in there, as a narrow column you had to hunt
+  for.
+- The page now has a **CPU / Goroutines** toggle, and CPU is the default:
+  `?mode=cpu` folds a real `runtime/pprof` CPU profile, weighted by the
+  time each sample stands for.
+- Goroutine mode keeps its own job — leaks and stuck workers — and now
+  folds away stacks parked in a read, a channel, a lock or a timer unless
+  `?parked=true` asks for them. It also stops counting the goroutine
+  taking the profile, which used to be the widest tower in Pulse's own
+  flame graph.
+
 ### Fixed — the N+1 finding now says which line issued the query (#9)
 
 - Pulse has always captured the caller of every query; it just never
