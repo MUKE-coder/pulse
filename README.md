@@ -361,7 +361,7 @@ Database: pulse.DatabaseConfig{
 Pulse registers a GORM plugin that hooks into Create, Query, Update, Delete, Row, and Raw callbacks. It tracks:
 - Query execution time and SQL normalization
 - Caller source file and line number
-- N+1 query detection per request (via trace ID correlation)
+- N+1 query detection per request (via trace ID correlation), each finding carrying the file and line that issued the repeated query
 - Connection pool statistics (open, in-use, idle connections)
 
 **Query plans (opt-in).** A slow query says what took long; its plan says why. With `pulse.WithExplainSlowQueries(0)` (or `ExplainSlowQueries: pulse.Bool(true)`), Pulse asks the database for the plan of a slow `SELECT` and shows it on the Database page under **Query Plans**, with the handful of things that usually explain it read off the top:

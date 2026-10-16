@@ -279,7 +279,12 @@ type N1Detection struct {
 	RequestTraceID string        `json:"request_trace_id"`
 	Route          string        `json:"route"`
 	SuggestedFix   string        `json:"suggested_fix,omitempty"`
-	DetectedAt     time.Time     `json:"detected_at"`
+	// CallerFile and CallerLine are where the repeated query was issued
+	// from — the one field that turns a detection into a fix. Captured
+	// when Database.TrackCallers is on, which it is by default.
+	CallerFile string    `json:"caller_file,omitempty"`
+	CallerLine int       `json:"caller_line,omitempty"`
+	DetectedAt time.Time `json:"detected_at"`
 }
 
 // N1Ranking is one row in the ranked-by-impact N+1 endpoint. Findings are
@@ -295,6 +300,8 @@ type N1Ranking struct {
 	TotalDuration    time.Duration `json:"total_duration"` // sum across all occurrences
 	ImpactScore      float64       `json:"impact_score"`   // sort key (higher = worse)
 	SuggestedFix     string        `json:"suggested_fix,omitempty"`
+	CallerFile       string        `json:"caller_file,omitempty"`
+	CallerLine       int           `json:"caller_line,omitempty"`
 	FirstSeen        time.Time     `json:"first_seen"`
 	LastSeen         time.Time     `json:"last_seen"`
 }

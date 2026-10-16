@@ -195,3 +195,8 @@
   .ops-wf-row { grid-template-columns: 1fr 48px; }
   .ops-wf-track { grid-column: 1 / -1; }
 }
+
+/* The file:line a query span came from, beside the SQL. */
+.ops-wf-caller {
+  font-size: 11px; color: var(--ops-ink-3); margin-left: 8px; white-space: nowrap;
+}

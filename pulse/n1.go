@@ -95,6 +95,8 @@ func rankN1Detections(in []N1Detection, limit int) []N1Ranking {
 		first        time.Time
 		last         time.Time
 		fix          string
+		callerFile   string
+		callerLine   int
 	}
 	groups := make(map[aggKey]*aggVal)
 
@@ -124,6 +126,11 @@ func rankN1Detections(in []N1Detection, limit int) []N1Ranking {
 		if v.fix == "" && d.SuggestedFix != "" {
 			v.fix = d.SuggestedFix
 		}
+		// Same for the call site: whichever detection in the group knows
+		// where the loop is, that is the answer for the whole group.
+		if v.callerFile == "" && d.CallerFile != "" {
+			v.callerFile, v.callerLine = d.CallerFile, d.CallerLine
+		}
 	}
 
 	out := make([]N1Ranking, 0, len(groups))
@@ -143,6 +150,8 @@ func rankN1Detections(in []N1Detection, limit int) []N1Ranking {
 			// Impact: total wall-clock cost, in milliseconds for readability.
 			ImpactScore:  float64(v.totalDur) / float64(time.Millisecond),
 			SuggestedFix: v.fix,
+			CallerFile:   v.callerFile,
+			CallerLine:   v.callerLine,
 			FirstSeen:    v.first,
 			LastSeen:     v.last,
 		})

@@ -1,6 +1,7 @@
 package pulse
 
 import (
+	"fmt"
 	"net/http"
 	"sort"
 	"time"
@@ -24,7 +25,10 @@ type traceSpan struct {
 	StatusCode   int           `json:"status_code,omitempty"`
 	Error        string        `json:"error,omitempty"`
 	Detail       string        `json:"detail,omitempty"` // the SQL, or the URL called
-	InstanceID   string        `json:"instance_id,omitempty"`
+	// Caller is the file:line a query was issued from, so the waterfall
+	// can say which line of yours ran it.
+	Caller     string `json:"caller,omitempty"`
+	InstanceID string `json:"instance_id,omitempty"`
 }
 
 // traceStore is implemented by storage backends that can find the records of
@@ -85,9 +89,14 @@ func querySpan(m QueryMetric) traceSpan {
 	case m.Operation != "":
 		name = m.Operation
 	}
+	caller := m.CallerFile
+	if caller != "" && m.CallerLine > 0 {
+		caller = fmt.Sprintf("%s:%d", caller, m.CallerLine)
+	}
 	return traceSpan{
 		Kind: "query", Name: name, SpanID: m.SpanID, ParentSpanID: m.ParentSpanID,
 		Start: m.Timestamp, Duration: m.Duration, Error: m.Error, Detail: m.SQL,
+		Caller: caller,
 	}
 }
 
@@ -148,7 +157,7 @@ func (s *sqlStore) traceSpans(traceID string) ([]traceSpan, error) {
 		return nil, err
 	}
 
-	rows, err = s.query(`SELECT timestamp, sql_text, duration_ns, error, operation, table_name, span_id, parent_span_id
+	rows, err = s.query(`SELECT timestamp, sql_text, duration_ns, error, operation, table_name, span_id, parent_span_id, caller_file, caller_line
 		FROM queries WHERE request_trace_id = ?`, traceID)
 	if err != nil {
 		return nil, err
@@ -159,7 +168,7 @@ func (s *sqlStore) traceSpans(traceID string) ([]traceSpan, error) {
 			ts, dur int64
 		)
 		if err := rows.Scan(&ts, &m.SQL, &dur, &m.Error, &m.Operation, &m.Table,
-			&m.SpanID, &m.ParentSpanID); err != nil {
+			&m.SpanID, &m.ParentSpanID, &m.CallerFile, &m.CallerLine); err != nil {
 			rows.Close()
 			return nil, err
 		}

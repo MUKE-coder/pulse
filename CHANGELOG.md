@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — the N+1 finding now says which line issued the query (#9)
+
+- Pulse has always captured the caller of every query; it just never
+  surfaced it where it mattered. `caller_file` and `caller_line` now travel
+  with each N+1 detection and through the ranked view, and the Database
+  page's N+1 table shows an **Issued from** column, so a finding points at
+  the loop instead of leaving you to grep for the SQL.
+- Query spans in `GET /pulse/api/traces/:id` carry `caller` too, which
+  makes the trace waterfall self-sufficient.
+- The N+1 table also shows the route it fired on and the suggested fix,
+  both of which the API already returned.
+- SQLite and PostgreSQL gain two columns on `n1_detections`, added to
+  existing databases by the usual migration.
+
 ## [1.4.0] — 2026-10-16
 
 The dashboard, redesigned: one neutral palette with a single accent, a

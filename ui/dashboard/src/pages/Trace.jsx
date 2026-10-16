@@ -88,6 +88,9 @@ export default function TracePage() {
                     <span className="ops-method">{s.kind}</span>
                     {s.name}
                     {s.detail && <span className="ops-wf-detail" title={s.detail}>{s.detail}</span>}
+                    {s.caller && (
+                      <span className="ops-wf-caller mono" title={s.caller}>{shortCaller(s.caller)}</span>
+                    )}
                   </div>
                   <div className="ops-wf-track">
                     <span className="ops-wf-bar"
@@ -123,4 +126,11 @@ export default function TracePage() {
       </div>
     </div>
   )
+}
+
+// shortCaller keeps the tail of a caller path: the file and line are what
+// identify the code, the rest is the module root.
+function shortCaller(caller) {
+  const parts = caller.split(/[\\/]/)
+  return parts.slice(-2).join('/')
 }

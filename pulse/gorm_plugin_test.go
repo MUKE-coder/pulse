@@ -283,9 +283,9 @@ func TestGormPlugin_CleanupTraceN1(t *testing.T) {
 	// trace-1 repeats one pattern 6 times (over the default threshold of 5);
 	// trace-2 runs a single query.
 	for i := 0; i < 6; i++ {
-		plugin.trackN1("trace-1", "GET /users", "select * from users where id = ?", 2*time.Millisecond)
+		plugin.trackN1("trace-1", "GET /users", "select * from users where id = ?", 2*time.Millisecond, "", 0)
 	}
-	plugin.trackN1("trace-2", "GET /posts", "select * from posts where id = ?", time.Millisecond)
+	plugin.trackN1("trace-2", "GET /posts", "select * from posts where id = ?", time.Millisecond, "", 0)
 
 	plugin.CleanupTraceN1("trace-1")
 
@@ -363,9 +363,9 @@ func TestGormPlugin_SweepFinalizesIdleTraces(t *testing.T) {
 
 	plugin := &PulsePlugin{pulse: p, n1Tracker: make(map[string]*n1Trace)}
 	for i := 0; i < 5; i++ {
-		plugin.trackN1("orphan", "", "select * from posts where author_id = ?", time.Millisecond)
+		plugin.trackN1("orphan", "", "select * from posts where author_id = ?", time.Millisecond, "", 0)
 	}
-	plugin.trackN1("active", "", "select 1", time.Millisecond)
+	plugin.trackN1("active", "", "select 1", time.Millisecond, "", 0)
 
 	plugin.sweepIdleN1Traces(time.Now())
 	if len(plugin.n1Tracker) != 2 {

@@ -50,6 +50,12 @@ type n1Trace struct {
 type n1Pattern struct {
 	count int
 	total time.Duration
+	// Where the repeated query was issued from. The first caller seen for
+	// a pattern inside one request is the loop that issued it; a later one
+	// would be a different call site for the same SQL, which is rare and
+	// not more informative.
+	callerFile string
+	callerLine int
 }
 
 // Name returns the plugin name as required by gorm.Plugin.
@@ -202,7 +208,7 @@ func (p *PulsePlugin) afterCallback(db *gorm.DB) {
 
 	// N+1 detection
 	if boolValue(cfg.DetectN1) && traceID != "" && normalized.Normalized != "" {
-		p.trackN1(traceID, route, normalized.Normalized, duration)
+		p.trackN1(traceID, route, normalized.Normalized, duration, callerFile, callerLine)
 	}
 
 	// A slow query says what took long; its plan says why. Asking is left
@@ -216,7 +222,7 @@ func (p *PulsePlugin) afterCallback(db *gorm.DB) {
 // trackN1 tallies one execution of normalizedSQL under traceID. Detections
 // are emitted when the trace is finalized, so they carry the real repeat
 // count and summed duration rather than a snapshot at the threshold.
-func (p *PulsePlugin) trackN1(traceID, route, normalizedSQL string, duration time.Duration) {
+func (p *PulsePlugin) trackN1(traceID, route, normalizedSQL string, duration time.Duration, callerFile string, callerLine int) {
 	p.n1TrackerMu.Lock()
 	defer p.n1TrackerMu.Unlock()
 
@@ -233,11 +239,14 @@ func (p *PulsePlugin) trackN1(traceID, route, normalizedSQL string, duration tim
 
 	pat, ok := tr.patterns[normalizedSQL]
 	if !ok {
-		pat = &n1Pattern{}
+		pat = &n1Pattern{callerFile: callerFile, callerLine: callerLine}
 		tr.patterns[normalizedSQL] = pat
 	}
 	pat.count++
 	pat.total += duration
+	if pat.callerFile == "" {
+		pat.callerFile, pat.callerLine = callerFile, callerLine
+	}
 }
 
 // finalizeTrace records an N1Detection for every query pattern that repeated
@@ -288,6 +297,8 @@ func (p *PulsePlugin) emitN1(traceID, route string, tr *n1Trace) {
 			RequestTraceID: traceID,
 			Route:          route,
 			SuggestedFix:   suggestN1Fix(sql),
+			CallerFile:     pat.callerFile,
+			CallerLine:     pat.callerLine,
 			DetectedAt:     now,
 		}
 

@@ -397,7 +397,9 @@ CREATE TABLE IF NOT EXISTS n1_detections (
 	avg_duration_ns  INTEGER NOT NULL DEFAULT 0,
 	request_trace_id TEXT    NOT NULL DEFAULT '',
 	route            TEXT    NOT NULL DEFAULT '',
-	suggested_fix    TEXT    NOT NULL DEFAULT ''
+	suggested_fix    TEXT    NOT NULL DEFAULT '',
+	caller_file      TEXT    NOT NULL DEFAULT '',
+	caller_line      INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_n1_detected_at ON n1_detections (detected_at);
 
@@ -529,6 +531,8 @@ var sqliteAddedColumns = []struct{ table, column, definition string }{
 	{"queries", "parent_span_id", "TEXT NOT NULL DEFAULT ''"},      // v1.2
 	{"errors", "trace_id", "TEXT NOT NULL DEFAULT ''"},             // v1.2
 	{"errors", "span_id", "TEXT NOT NULL DEFAULT ''"},              // v1.2
+	{"n1_detections", "caller_file", "TEXT NOT NULL DEFAULT ''"},   // v1.4.1
+	{"n1_detections", "caller_line", "INTEGER NOT NULL DEFAULT 0"}, // v1.4.1
 }
 
 // migrateSQLiteColumns adds any column in sqliteAddedColumns that the
@@ -856,17 +860,17 @@ func (s *sqlStore) GetQueryPatterns(tr TimeRange) ([]QueryPattern, error) {
 
 func (s *sqlStore) StoreN1Detection(d N1Detection) error {
 	return s.enqueue(
-		`INSERT INTO n1_detections (detected_at, pattern, count, total_duration_ns, avg_duration_ns, request_trace_id, route, suggested_fix)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO n1_detections (detected_at, pattern, count, total_duration_ns, avg_duration_ns, request_trace_id, route, suggested_fix, caller_file, caller_line)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		d.DetectedAt.UnixNano(), d.Pattern, d.Count, int64(d.TotalDuration), int64(d.AvgDuration),
-		d.RequestTraceID, d.Route, d.SuggestedFix,
+		d.RequestTraceID, d.Route, d.SuggestedFix, d.CallerFile, d.CallerLine,
 	)
 }
 
 func (s *sqlStore) GetN1Detections(tr TimeRange) ([]N1Detection, error) {
 	s.sync()
 	rows, err := s.query(
-		`SELECT detected_at, pattern, count, total_duration_ns, avg_duration_ns, request_trace_id, route, suggested_fix
+		`SELECT detected_at, pattern, count, total_duration_ns, avg_duration_ns, request_trace_id, route, suggested_fix, caller_file, caller_line
 		 FROM n1_detections
 		 WHERE detected_at BETWEEN ? AND ?
 		 ORDER BY detected_at DESC`,
@@ -883,7 +887,7 @@ func (s *sqlStore) GetN1Detections(tr TimeRange) ([]N1Detection, error) {
 			d              N1Detection
 		)
 		if err := rows.Scan(&ts, &d.Pattern, &d.Count, &total, &avg,
-			&d.RequestTraceID, &d.Route, &d.SuggestedFix); err != nil {
+			&d.RequestTraceID, &d.Route, &d.SuggestedFix, &d.CallerFile, &d.CallerLine); err != nil {
 			return nil, err
 		}
 		d.DetectedAt = time.Unix(0, ts)

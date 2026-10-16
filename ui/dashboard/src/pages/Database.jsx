@@ -21,6 +21,15 @@ function n1Severity(addedNs) {
   return 'low'
 }
 
+// shortCaller keeps the tail of a path, which is the part that identifies
+// the file: internal/services/catalog_report.go:148.
+function shortCaller(file, line) {
+  if (!file) return '—'
+  const parts = file.split(/[\\/]/)
+  const tail = parts.slice(-2).join('/')
+  return line ? `${tail}:${line}` : tail
+}
+
 function sinceText(iso) {
   const then = new Date(iso).getTime()
   if (!isFinite(then)) return '—'
@@ -278,6 +287,7 @@ export default function DatabasePage() {
                   <tr>
                     <th scope="col">Route</th>
                     <th scope="col">Repeated query</th>
+                    <th scope="col">Issued from</th>
                     <th scope="col" className="num">Calls / req</th>
                     <th scope="col" className="num">Added latency</th>
                     <th scope="col">Last seen</th>
@@ -291,7 +301,26 @@ export default function DatabasePage() {
                     return (
                       <tr key={`${d.route}-${d.pattern}-${i}`}>
                         <td className="mono">{d.route || '—'}</td>
-                        <td className="code" title={d.pattern}>{d.pattern}</td>
+                        <td className="code" title={d.suggested_fix ? `${d.pattern}
+
+${d.suggested_fix}` : d.pattern}>
+                          {d.pattern}
+                          {d.suggested_fix ? (
+                            <div className="muted" style={{
+                              fontFamily: 'var(--font-sans)', fontSize: 11, marginTop: 2,
+                              overflow: 'hidden', textOverflow: 'ellipsis',
+                            }}>
+                              {d.suggested_fix}
+                            </div>
+                          ) : null}
+                        </td>
+                        <td className="mono" style={{ fontSize: 12 }}>
+                          {d.caller_file
+                            ? <span title={`${d.caller_file}${d.caller_line ? `:${d.caller_line}` : ''}`}>
+                              {shortCaller(d.caller_file, d.caller_line)}
+                            </span>
+                            : <span className="muted" title="Set Database.TrackCallers to capture this">—</span>}
+                        </td>
                         <td className="num">{Math.round(d.avg_queries_per_hit || 0)}</td>
                         <td className={`num ${level === 'critical' ? 'crit' : level === 'warning' ? 'warn' : 'muted'}`}>
                           +{ms(added)}
