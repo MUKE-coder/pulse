@@ -35,11 +35,14 @@ statement you have no values for. Three of its techniques are now here.
 - **PostgreSQL plans are read as JSON** rather than scraped from text.
   Pulse walks the node tree, so a scan under a join or a sort is still
   found, a scan a `LIMIT` stops early is no longer reported, and a
-  parallel scan's rows are counted the way the planner counts them. The
-  hint names the index that would serve the filter — *"sequential scan on
-  orders (~1.2M rows) filtering on user_id, status: consider an index on
-  orders(user_id, status)"* — and says nothing about a column wrapped in a
-  function, where a plain index would not be used.
+  parallel scan's rows are counted the way the planner counts them.
+- **The catalog decides whether a scan is worth mentioning.** Two
+  read-only lookups — the table's row estimate and the leading column of
+  each of its indexes — mean the hint can name a real table size and, more
+  usefully, stay quiet: nothing when an index already leads with the
+  filtered column, nothing for a small table, and no index suggestion for
+  a filter that matches most of the table or for a column wrapped in a
+  function. What is left is advice that works.
 
 ## [1.5.1] — 2026-10-16
 

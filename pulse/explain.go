@@ -264,7 +264,16 @@ func explainPostgres(ctx context.Context, tx *sql.Tx, query string, params int, 
 		// Unparseable JSON is still worth showing as text.
 		return planResult{text: raw, hints: planHints("postgres", raw)}, nil
 	}
-	return planResult{text: renderPlanTree(node), hints: postgresHints(node)}, nil
+
+	// The plan says a scan happened; the catalog says whether that is news.
+	// A table with an index already leading on the filtered column was
+	// scanned on purpose, and saying "add an index" there would be noise.
+	scans, hints := walkPlan(node)
+	hints = append(hints, catalogHints(ctx, tx, scans)...)
+	if len(hints) > maxPlanHints {
+		hints = hints[:maxPlanHints]
+	}
+	return planResult{text: renderPlanTree(node), hints: hints}, nil
 }
 
 // explainPreparedPostgres plans a parameterised statement with no values.
@@ -508,17 +517,37 @@ func formatRowEstimate(rows float64) string {
 	}
 }
 
-// bigScanRows is where a sequential scan stops being a detail and starts
-// being the answer. Below it the planner is usually right.
-const bigScanRows = 10_000
+// A sequential scan is worth mentioning when the table it reads is big.
+// Not when the scan *returns* a lot of rows: the worst case of all is a
+// selective filter with no index, which reads a million rows to return
+// one, and gating on the output would hide exactly that.
+const (
+	bigScanRows = 10_000
+	// bigScanCost stands in for the table's size when the catalog has not
+	// been asked. A sequential scan costs roughly one unit per page plus a
+	// hundredth per row, so this is a table of some tens of thousands.
+	bigScanCost = 500
+)
 
-// postgresHints reads the handful of things that most often explain a slow
-// query off the plan tree. Walking the tree rather than the text means a
-// scan buried under a join or a sort is still found, a scan a LIMIT stops
-// early is not reported, and a parallel scan's rows are counted the way the
+// planScan is a sequential scan the walk thinks is worth mentioning.
+type planScan struct {
+	relation string
+	columns  []string // the columns its filter tests, which an index would cover
+	rows     float64  // rows the scan is expected to return, across parallel workers
+	cost     float64  // the planner's cost for the scan, a proxy for the table's size
+	filtered bool     // the scan has a filter, so it reads more than it returns
+}
+
+// walkPlan reads the handful of things that most often explain a slow query
+// off the plan tree. Walking the tree rather than the text means a scan
+// buried under a join or a sort is still found, a scan a LIMIT stops early
+// is not reported, and a parallel scan's rows are counted the way the
 // planner counts them.
-func postgresHints(root *planNode) []string {
-	var hints []string
+func walkPlan(root *planNode) ([]planScan, []string) {
+	var (
+		scans []planScan
+		hints []string
+	)
 	add := func(h string) {
 		for _, seen := range hints {
 			if seen == h {
@@ -542,18 +571,14 @@ func postgresHints(root *planNode) []string {
 				rows *= parallelRowDivisor(workers)
 			}
 			// A LIMIT above the scan can stop it before it reads the table.
-			if !limited && rows >= bigScanRows {
-				where := n.Relation
-				if where == "" {
-					where = "a table"
-				}
-				if cols := filterColumns(n.Filter); len(cols) > 0 {
-					add(fmt.Sprintf("sequential scan on %s (~%s rows) filtering on %s: consider an index on %s(%s)",
-						where, formatRowEstimate(rows), strings.Join(cols, ", "), where, strings.Join(cols, ", ")))
-				} else {
-					add(fmt.Sprintf("reads all of %s (~%s rows) with a sequential scan",
-						where, formatRowEstimate(rows)))
-				}
+			if !limited {
+				scans = append(scans, planScan{
+					relation: n.Relation,
+					columns:  filterColumns(n.Filter),
+					rows:     rows,
+					cost:     n.TotalCost,
+					filtered: n.Filter != "",
+				})
 			}
 		case "Limit":
 			limited = true
@@ -580,7 +605,124 @@ func postgresHints(root *planNode) []string {
 		}
 	}
 	walk(root, false, 0)
+	return scans, hints
+}
+
+// postgresHints is what a plan says on its own, without asking the database
+// anything else about the tables involved.
+func postgresHints(root *planNode) []string {
+	scans, hints := walkPlan(root)
+	for _, scan := range scans {
+		if h := scanHint(scan, nil); h != "" && len(hints) < maxPlanHints {
+			hints = append(hints, h)
+		}
+	}
 	return hints
+}
+
+// scanHint words one sequential scan. With facts about the table it can say
+// how big it really is — and say nothing at all when an index already leads
+// with a filtered column, because then the planner chose the scan on
+// purpose and an index suggestion would be noise.
+func scanHint(scan planScan, facts *tableFacts) string {
+	where := scan.relation
+	if where == "" {
+		where = "a table"
+	}
+
+	// How big the table is, which is what decides whether a scan matters.
+	// The catalog knows; without it, the scan's own cost is the proxy,
+	// because the rows it returns say nothing about the rows it reads.
+	tableRows := scan.rows
+	known := false
+	if facts != nil && facts.rows > 0 {
+		tableRows, known = float64(facts.rows), true
+	}
+	if known {
+		if tableRows < bigScanRows {
+			return ""
+		}
+	} else if scan.rows < bigScanRows && scan.cost < bigScanCost {
+		return ""
+	}
+
+	// A filter that keeps most of the table cannot use an index well, and
+	// a scan with no filter reads it all by definition.
+	if !scan.filtered || (known && scan.rows >= tableRows/2) {
+		return fmt.Sprintf("reads all of %s (~%s rows) with a sequential scan", where, formatRowEstimate(tableRows))
+	}
+	if len(scan.columns) == 0 {
+		return fmt.Sprintf("sequential scan on %s (~%s rows) with a filter an index could serve",
+			where, formatRowEstimate(tableRows))
+	}
+	if facts != nil {
+		for _, col := range scan.columns {
+			if facts.indexed[col] {
+				return "" // an index leads with this column; the planner passed on it
+			}
+		}
+	}
+	cols := strings.Join(scan.columns, ", ")
+	return fmt.Sprintf("sequential scan on %s (~%s rows) filtering on %s: consider an index on %s(%s)",
+		where, formatRowEstimate(tableRows), cols, where, cols)
+}
+
+// tableFacts is what the catalog knows about a table a scan touched: how
+// many rows it holds, and which columns an index already leads with.
+type tableFacts struct {
+	rows    int64
+	indexed map[string]bool
+}
+
+// maxCatalogLookups bounds what explaining one query asks of the catalog.
+const maxCatalogLookups = 3
+
+// catalogHints words each scan with the catalog's help. The two queries are
+// read-only lookups in the same rolled-back transaction as the EXPLAIN.
+func catalogHints(ctx context.Context, tx *sql.Tx, scans []planScan) []string {
+	var hints []string
+	for i, scan := range scans {
+		var facts *tableFacts
+		if i < maxCatalogLookups && scan.relation != "" {
+			facts = lookupTableFacts(ctx, tx, scan.relation)
+		}
+		if h := scanHint(scan, facts); h != "" && len(hints) < maxPlanHints {
+			hints = append(hints, h)
+		}
+	}
+	return hints
+}
+
+// lookupTableFacts reads the row estimate the planner itself uses and the
+// leading column of every index on the table. A nil result means the
+// catalog had nothing to say, and the hint falls back to the plan's own
+// numbers.
+func lookupTableFacts(ctx context.Context, tx *sql.Tx, relation string) *tableFacts {
+	facts := &tableFacts{indexed: map[string]bool{}}
+
+	// to_regclass resolves the name through the search path and returns
+	// NULL rather than erroring on a name that isn't there.
+	row := tx.QueryRowContext(ctx,
+		`SELECT COALESCE(c.reltuples, -1)::bigint FROM pg_class c WHERE c.oid = to_regclass($1)`, relation)
+	if err := row.Scan(&facts.rows); err != nil {
+		return nil
+	}
+
+	rows, err := tx.QueryContext(ctx, `SELECT a.attname
+		FROM pg_index i
+		JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
+		WHERE i.indrelid = to_regclass($1)`, relation)
+	if err != nil {
+		return facts
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var col string
+		if err := rows.Scan(&col); err == nil {
+			facts.indexed[col] = true
+		}
+	}
+	return facts
 }
 
 // parallelRowDivisor mirrors how the planner splits a parallel scan's rows

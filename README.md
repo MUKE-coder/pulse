@@ -391,14 +391,19 @@ A plan captured while the query actually ran uses that run's own values and is t
 
 #### What Pulse reads off a plan
 
-On PostgreSQL the plan comes back as JSON and Pulse walks the node tree, so a scan buried under a join or a sort is still found, a scan a `LIMIT` stops early is not reported, and a parallel scan's rows are counted the way the planner counts them. The hint then names the index that would serve the filter:
+On PostgreSQL the plan comes back as JSON and Pulse walks the node tree, so a scan buried under a join or a sort is still found, a scan a `LIMIT` stops early is not reported, and a parallel scan's rows are counted the way the planner counts them. It then asks the catalog two read-only questions — how big is this table, and which columns do its indexes lead with — and words the hint accordingly:
 
 ```
-sequential scan on orders (~1.2M rows) filtering on user_id, status:
-consider an index on orders(user_id, status)
+sequential scan on orders (~60k rows) filtering on note:
+consider an index on orders(note)
 ```
 
-A column wrapped in a function (`lower(email)`) yields no column suggestion on purpose — a plain index on `email` would not serve it, and advice that does not work is worse than none.
+What it **doesn't** say matters as much:
+
+- **Nothing when an index already leads with the filtered column.** The planner chose the scan on purpose, and repeating the index you have back at you is noise.
+- **Nothing about a small table.** The gate is the table's size, not the rows the scan returns — a selective filter with no index returns one row after reading a million, and that is the most actionable finding of all.
+- **No index suggestion for a filter that matches most of the table**, because an index could not serve it. You get "reads all of orders (~60k rows)" instead, which is what is actually happening.
+- **No column suggestion for a column wrapped in a function** (`lower(email)`), since a plain index on `email` would not be used.
 
 > **See also:** [pg-guard](https://github.com/iyiola-dev/pg-guard) is a static Postgres linter for Go — it reads the SQL in your source at CI time and checks it against a live database. It catches the N+1 you *wrote*; Pulse catches the one that *ran*, tells you what it cost and, since both report `file:line`, points at the same place. The generic-planning technique above comes from it.
 

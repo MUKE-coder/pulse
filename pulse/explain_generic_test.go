@@ -111,8 +111,18 @@ func TestPostgresHints_ReadTheTree(t *testing.T) {
 		},
 		{
 			name: "a small table is the planner's business",
-			plan: `[{"Plan":{"Node Type":"Seq Scan","Relation Name":"settings","Plan Rows":40}}]`,
+			plan: `[{"Plan":{"Node Type":"Seq Scan","Relation Name":"settings","Plan Rows":40,"Total Cost":12}}]`,
 			want: "",
+		},
+		{
+			// The case the live check caught: a selective filter with no
+			// index reads the whole table to return one row. Gating on
+			// rows returned would hide the most actionable finding there
+			// is, so the gate is the scan's cost — a proxy for the table.
+			name: "a selective filter with no index is the point",
+			plan: `[{"Plan":{"Node Type":"Seq Scan","Relation Name":"orders","Plan Rows":1,
+				"Total Cost":1192,"Filter":"(note = $1)"}}]`,
+			want: "consider an index on orders(note)",
 		},
 		{
 			name: "a sort that spilled",
